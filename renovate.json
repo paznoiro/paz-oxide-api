@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "docker:pinDigests"],
+  "packageRules": [
+    {
+      "matchDatasources": ["docker"],
+      "groupName": "base images"
+    },
+    {
+      "matchPackageNames": ["pdf_oxide", "office_oxide", "ort"],
+      "enabled": false,
+      "description": "Pinned together: bump by hand, re-check patches/ and the ONNX Runtime version"
+    }
+  ]
+}

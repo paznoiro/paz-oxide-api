@@ -1,0 +1,931 @@
+{
+  "info": {
+    "name": "Oxide API",
+    "description": "Text and markdown extraction from PDF, Office (DOCX/XLSX/PPTX/DOC/XLS/PPT), OpenDocument (ODT/ODS/ODP) and image files (PNG/JPEG/TIFF/WebP/GIF/BMP/JP2/PNM/TGA), with OCR (en, hi, ar) for scanned PDFs and images. The file type is detected from the content, so every request in `extract` takes any of them.\n\nAuth: `OXIDE_API_API_KEY` as Bearer token on all `POST /v1/*`. Set the `apiKey` collection/environment variable. Ops endpoints (`GET /healthz`, `/readyz`, `/version`, `/metrics`, `/openapi.json`, `/openapi.yaml`, `/docs`) are unauthenticated.\n\nFolders: `extract` (every endpoint, any file), `images (OCR)` and `opendocument` (format-specific examples), `ops`.\n\nImport this file + `oxide-api.postman_environment.json` into Postman, set `apiKey` to your key, pick a file for the `file` form-data key on multipart requests. The file sources point at the repo's test fixtures: set Postman's working directory to the repo root (Settings → General → Working directory) to send them as-is, or pick your own file.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{apiKey}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "apiKey",
+      "value": "CHANGE-ME-TO-OXIDE_API_API_KEY",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "extract",
+      "description": "Authenticated. Bearer `{{apiKey}}` (= `OXIDE_API_API_KEY`) is inherited from the collection.",
+      "item": [
+        {
+          "name": "POST /v1/extract/text (multipart)",
+          "request": {
+            "description": "Plain text from any supported file. Office and OpenDocument: the document's text. PDF: per-page native text, with OCR for pages that need it. Images: OCR text per page. Multipart is preferred for large files.\n\nOptional query params: `pages=1-3,5`, `ocr=auto|force|off`, `lang=auto|en|hi|ar` (PDFs and images), `format=pdf|docx|xlsx|pptx|doc|xls|ppt|odt|ods|odp|png|jpeg|tiff|webp|gif|bmp|jp2|pnm|tga`, `filename=report.pdf`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/text",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "text"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "Pick any supported file: PDF, DOCX / XLSX / PPTX / DOC / XLS / PPT, ODT / ODS / ODP, or an image (PNG / JPEG / TIFF / WebP / GIF / BMP / JP2 / PNM / TGA).",
+                  "src": ""
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with extracted text\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.text).to.be.a(\"string\");",
+                  "    pm.expect(j.char_count).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/text (JSON base64)",
+          "request": {
+            "description": "Same endpoint via JSON. Handy for n8n / Dify / Zapier. Replace FILE_BASE64 with `base64 < file | tr -d '\\n'`. The 32 MiB limit counts the base64 text. `format` is only a hint (the content decides); drop it or set it to the file's type, e.g. `ods` or `png`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/text",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "text"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_base64\": \"FILE_BASE64\",\n  \"format\": \"pdf\",\n  \"pages\": \"1-3\",\n  \"ocr\": \"auto\",\n  \"lang\": \"auto\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with extracted text\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.text).to.be.a(\"string\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/text (raw body, text/plain)",
+          "request": {
+            "description": "Raw bytes as body + `Accept: text/plain` returns raw text (metadata in `X-Oxide-*` headers, e.g. `X-Oxide-Kind: image`, `X-Oxide-Ocr-Status`). Example query: `?pages=2`. In Postman: Body -> Binary -> pick file.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/plain"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/text?pages=1-3",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "text"],
+              "query": [
+                {
+                  "key": "pages",
+                  "value": "1-3",
+                  "description": "PDFs and images (TIFF pages). 1-based pages and ranges, e.g. 1-3,5."
+                },
+                {
+                  "key": "ocr",
+                  "value": "auto",
+                  "disabled": true,
+                  "description": "PDFs and images: auto | force | off. Images are always OCR'd unless off."
+                },
+                {
+                  "key": "lang",
+                  "value": "auto",
+                  "disabled": true,
+                  "description": "PDFs and images: auto | en | hi | ar"
+                }
+              ]
+            },
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": ""
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 text/plain\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"text/plain\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/markdown (multipart)",
+          "request": {
+            "description": "Office and OpenDocument: headings, lists, tables (one table per sheet, one section per slide). PDF: per-page markdown with heading detection. Images: OCR lines and paragraphs. Extra param vs text: `detect_headings=true|false` (PDF only).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/markdown",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "markdown"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "Pick any supported file: PDF, DOCX / XLSX / PPTX / DOC / XLS / PPT, ODT / ODS / ODP, or an image (PNG / JPEG / TIFF / WebP / GIF / BMP / JP2 / PNM / TGA).",
+                  "src": ""
+                },
+                {
+                  "key": "detect_headings",
+                  "value": "true",
+                  "type": "text",
+                  "disabled": true,
+                  "description": "PDF markdown only."
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with markdown\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().text).to.be.a(\"string\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/markdown (raw body, text/markdown)",
+          "request": {
+            "description": "Raw bytes + `Accept: text/markdown` returns raw markdown. In Postman: Body -> Binary -> pick file.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/markdown"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/markdown",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "markdown"]
+            },
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": ""
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 text/markdown\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"text/markdown\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/info (multipart)",
+          "request": {
+            "description": "Format, metadata and structure without extracting text. Office and OpenDocument: metadata, sheet names and dimensions, slide count, section count. PDF: version, page count, encryption, page geometry. Images: page count and pixel dimensions, read from the headers (nothing is decoded).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/info",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "info"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "Pick any supported file: PDF, DOCX / XLSX / PPTX / DOC / XLS / PPT, ODT / ODS / ODP, or an image (PNG / JPEG / TIFF / WebP / GIF / BMP / JP2 / PNM / TGA).",
+                  "src": ""
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with info\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.format).to.be.a(\"string\");",
+                  "    pm.expect(j.format_source).to.be.oneOf([\"sniff\", \"param\", \"filename\"]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "images (OCR)",
+      "description": "Images go straight to OCR (en, hi, ar): PNG, JPEG, TIFF (one page per TIFF page, CCITT fax TIFFs included), WebP, GIF (first frame), BMP, JPEG 2000, PNM, TGA. EXIF orientation is applied, so a sideways phone photo reads correctly, and transparent backgrounds are composited onto white. The response has the PDF shape with `kind: image`; every page's `ocr.reasons` entry is `image`.\n\nLimits: 64 megapixels per page (`OXIDE_API_MAX_IMAGE_PIXELS`, else `422 image-too-large`), 2000 TIFF pages. HEIC/HEIF (iPhone camera files), AVIF and JPEG XL are rejected with a `422 unsupported-format` that names the format: convert them to JPEG or PNG first.\n\nThe file sources point at the repo's test fixtures: set Postman's working directory to the repo root (Settings → General → Working directory) to send them as-is, or pick your own file.",
+      "item": [
+        {
+          "name": "POST /v1/extract/text — image (multipart)",
+          "request": {
+            "description": "OCR text of an image. `lang=auto` probes the first page's text with every recognizer; set `lang` when you know the language. TGA has no signature: the uploaded filename (`.tga`) or `format=tga` identifies it.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/text",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "text"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "An image: PNG, JPEG, TIFF, WebP, GIF, BMP, JP2, PNM or TGA. The fixture is an English invoice scan.",
+                  "src": "tests/fixtures/scan_en.png"
+                },
+                {
+                  "key": "lang",
+                  "value": "auto",
+                  "type": "text",
+                  "disabled": true,
+                  "description": "auto | en | hi | ar"
+                },
+                {
+                  "key": "ocr",
+                  "value": "off",
+                  "type": "text",
+                  "disabled": true,
+                  "description": "off returns no text; the image is still validated."
+                },
+                {
+                  "key": "format",
+                  "value": "tga",
+                  "type": "text",
+                  "disabled": true,
+                  "description": "Only needed for a TGA uploaded without a .tga filename."
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200, image OCR'd\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.kind).to.eql(\"image\");",
+                  "    pm.expect(j.ocr.status).to.be.oneOf([\"ocr\", \"off\", \"unavailable\"]);",
+                  "    pm.expect(j.text).to.be.a(\"string\");",
+                  "    pm.expect(j.page_count).to.be.at.least(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/text — sideways phone photo (EXIF)",
+          "request": {
+            "description": "The fixture's pixels are stored rotated 90° with EXIF Orientation 6, like a photo taken with the phone held sideways. The service rotates it upright before OCR.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/text",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "text"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "A JPEG photo; the fixture carries EXIF Orientation 6.",
+                  "src": "tests/fixtures/scan_en_exif.jpg"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200, photo OCR'd upright\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.kind).to.eql(\"image\");",
+                  "    pm.expect(j.ocr.status).to.be.oneOf([\"ocr\", \"off\", \"unavailable\"]);",
+                  "    pm.expect(j.text).to.be.a(\"string\");",
+                  "    pm.expect(j.format).to.eql(\"jpeg\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/text — multi-page TIFF, page 2 (raw body)",
+          "request": {
+            "description": "A multi-page TIFF is one page per TIFF page; `pages` selects them like PDF pages (omit it for all). The fixture is a two-page CCITT Group 4 fax TIFF. In Postman: Body -> Binary -> pick file.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/text?pages=2",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "text"],
+              "query": [
+                {
+                  "key": "pages",
+                  "value": "2",
+                  "description": "1-based TIFF pages, e.g. 1-3,5"
+                }
+              ]
+            },
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": "tests/fixtures/scan_pages.tif"
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200, only page 2\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.kind).to.eql(\"image\");",
+                  "    pm.expect(j.ocr.status).to.be.oneOf([\"ocr\", \"off\", \"unavailable\"]);",
+                  "    pm.expect(j.text).to.be.a(\"string\");",
+                  "    pm.expect(j.page_count).to.be.at.least(2);",
+                  "    pm.expect(j.pages_extracted).to.eql([2]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/markdown — Arabic WebP (raw markdown)",
+          "request": {
+            "description": "Raw bytes + `Accept: text/markdown` returns the OCR text; `X-Oxide-Lang` names the language the probe chose (`ar` for the fixture). In Postman: Body -> Binary -> pick file.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/markdown"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/markdown",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "markdown"]
+            },
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": "tests/fixtures/scan_ar.webp"
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 text/markdown from an image\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.headers.get(\"X-Oxide-Kind\")).to.eql(\"image\");",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"text/markdown\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/info — image",
+          "request": {
+            "description": "Page count and pixel dimensions per page, read from the headers only (dimensions are as stored, before EXIF rotation).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/info",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "info"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "An image. The fixture is a two-page TIFF.",
+                  "src": "tests/fixtures/scan_pages.tif"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with image info\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.kind).to.eql(\"image\");",
+                  "    pm.expect(j.page_count).to.eql(j.pages.length);",
+                  "    pm.expect(j.pages[0].width).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "opendocument",
+      "description": "ODT, ODS and ODP (and their templates OTT/OTS/OTP), as saved by LibreOffice, Collabora or Google Docs. Same response shape as Office documents: `kind: office`, `format: odt|ods|odp`; `X-Engine` is `oxide-api/<version>`. Markdown has headings, lists and tables, one `## <sheet>` table per sheet and one section per slide with speaker notes. Comments, tracked deletions and headers/footers are left out. A password-protected file is a `422 encrypted-document`.\n\nThe file sources point at the repo's test fixtures: set Postman's working directory to the repo root (Settings → General → Working directory) to send them as-is, or pick your own file.",
+      "item": [
+        {
+          "name": "POST /v1/extract/markdown — ODT / ODS / ODP (multipart)",
+          "request": {
+            "description": "Markdown from an OpenDocument file. The fixture is a text document with a heading and a table; swap in `sample.ods` or `sample.odp` for a spreadsheet or a presentation.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/markdown",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "markdown"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "An ODT, ODS or ODP file.",
+                  "src": "tests/fixtures/sample.odt"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with OpenDocument markdown\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.kind).to.eql(\"office\");",
+                  "    pm.expect(j.format).to.be.oneOf([\"odt\", \"ods\", \"odp\"]);",
+                  "    pm.expect(j.text).to.be.a(\"string\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/info — spreadsheet (ODS)",
+          "request": {
+            "description": "Metadata from `meta.xml` plus sheet names and dimensions (rows and columns that hold text).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/info",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "info"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "An ODS spreadsheet (ODT and ODP work too: section count / slide count).",
+                  "src": "tests/fixtures/sample.ods"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with sheets\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.format).to.eql(\"ods\");",
+                  "    pm.expect(j.sheets).to.be.an(\"array\").that.is.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ops",
+      "description": "Unauthenticated. No Bearer token sent.",
+      "item": [
+        {
+          "name": "GET /healthz",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/healthz",
+              "host": ["{{baseUrl}}"],
+              "path": ["healthz"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"alive\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().status).to.eql(\"ok\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /readyz",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/readyz",
+              "host": ["{{baseUrl}}"],
+              "path": ["readyz"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"ready\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().status).to.eql(\"ready\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /version",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/version",
+              "host": ["{{baseUrl}}"],
+              "path": ["version"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"version\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().name).to.be.a(\"string\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /metrics",
+          "request": {
+            "description": "Prometheus text exposition. May be blocked (404) behind Caddy on public deployments.",
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/metrics",
+              "host": ["{{baseUrl}}"],
+              "path": ["metrics"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"metrics or blocked\", function () {",
+                  "    pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /openapi.json",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/openapi.json",
+              "host": ["{{baseUrl}}"],
+              "path": ["openapi.json"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"contract\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().paths[\"/v1/extract/text\"]).to.be.an(\"object\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /openapi.yaml",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/openapi.yaml",
+              "host": ["{{baseUrl}}"],
+              "path": ["openapi.yaml"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 yaml\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

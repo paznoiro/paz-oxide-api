@@ -1,0 +1,63 @@
+pdf_oxide's object parser recurses parse_object <-> parse_array/parse_dictionary
+with no depth bound, so a crafted PDF with deeply nested arrays overflows the
+worker stack and aborts the whole process (stack overflows can't be caught by
+catch_unwind). Cap nesting at 256 levels and fail the parse instead.
+
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -21,6 +21,39 @@
+ use nom::IResult;
+ use std::collections::HashMap;
+ 
++/// Maximum nesting of arrays/dictionaries inside one object. Real documents
++/// stay in single digits; without a bound, `parse_object` ↔ `parse_array`
++/// recursion lets a crafted file overflow the thread stack and abort the
++/// process (stack overflows can't be caught).
++const MAX_NESTING_DEPTH: u32 = 256;
++
++thread_local! {
++    static NESTING_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
++}
++
++struct NestingGuard;
++
++impl NestingGuard {
++    fn enter(input: &[u8]) -> std::result::Result<Self, nom::Err<nom::error::Error<&[u8]>>> {
++        let depth = NESTING_DEPTH.with(|d| {
++            let v = d.get() + 1;
++            d.set(v);
++            v
++        });
++        if depth > MAX_NESTING_DEPTH {
++            NESTING_DEPTH.with(|d| d.set(d.get() - 1));
++            return Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge)));
++        }
++        Ok(NestingGuard)
++    }
++}
++
++impl Drop for NestingGuard {
++    fn drop(&mut self) {
++        NESTING_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
++    }
++}
++
+ /// Decode escape sequences in PDF literal strings.
+ ///
+ /// PDF literal strings (enclosed in parentheses) support escape sequences
+@@ -421,6 +454,7 @@
+ /// - Array is not properly closed with `]`
+ /// - Array contains malformed objects
+ fn parse_array(input: &[u8]) -> IResult<&[u8], Object> {
++    let _depth = NestingGuard::enter(input)?;
+     let mut objects = Vec::new();
+     let mut remaining = input;
+ 
+@@ -483,6 +517,7 @@
+ /// - A key is not a name
+ /// - Values are malformed
+ fn parse_dictionary(input: &[u8]) -> IResult<&[u8], Object> {
++    let _depth = NestingGuard::enter(input)?;
+     let mut dict = HashMap::new();
+     let mut remaining = input;
+ 

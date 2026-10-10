@@ -1,0 +1,72 @@
+# Server compose for oxide-api, uploaded and run by `zd`
+# (deployments/production.docs.yaml: `compose: file: docker-compose.yml`).
+# The image is pulled from GHCR; nothing is built on the server.
+# Local run without SSH or Caddy: ./scripts/local.sh (publishes :8080).
+#
+# zd renders the deployment yaml's env: block into a tmpfs file, uses it for
+# the ${IMAGE_REPO}/${IMAGE_TAG} interpolation below and exports its path as
+# ZAP_ENV_FILE, so the API key never touches the server's disk.
+services:
+  oxide-api:
+    image: ${IMAGE_REPO:-ghcr.io/zaporion/oxide-api}:${IMAGE_TAG:-0.1.0}
+    container_name: oxide-api
+    restart: unless-stopped
+    # SIGTERM fails /readyz and lets in-flight requests finish; an OCR request
+    # ends by its 90 s deadline (OXIDE_API_OCR_TIMEOUT_SECS) at the latest.
+    stop_grace_period: 95s
+
+    # --- reap zombie processes (PID 1) ---
+    init: true
+
+    # Every OXIDE_API_* setting comes from the deployment yaml. format: raw
+    # stops compose from interpolating values, so a `$` in a secret survives.
+    env_file:
+      - path: ${ZAP_ENV_FILE:-.env}
+        format: raw
+
+    # Reached by Caddy as oxide-api:8080 on the `web` network; no host port.
+    expose:
+      - "8080"
+
+    # The image's HEALTHCHECK (`oxide-api healthcheck`, GET /healthz) is used
+    # as is; zd waits for it to report healthy.
+
+    # --- log rotation (json-file driver) ---
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+
+    # Measured in docs/performance.md: 224 MiB idle, under 1 GiB at peak with
+    # 8 concurrent 32 MiB uploads. Collabora shares this 4-vCPU host (limit 2).
+    deploy:
+      resources:
+        limits:
+          cpus: 4
+          memory: 3G
+          pids: 256
+        reservations:
+          cpus: 0.25
+          memory: 256M
+
+    # --- security hardening (distroless, non-root, no writes needed) ---
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+    networks:
+      - web
+
+networks:
+  web:
+    name: web
+    external: true

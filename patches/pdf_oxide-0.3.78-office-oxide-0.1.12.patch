@@ -1,0 +1,15 @@
+pdf_oxide 0.3.78 builds `office_oxide::DocumentIR` with a struct literal that
+predates the `defined_names` field added in office_oxide 0.1.12, so it fails to
+compile against any office_oxide >= 0.1.12 (cargo resolves 0.1.13). Filling the
+remaining fields from `Default` keeps the crate building on both old and new
+office_oxide. Drop this patch once upstream ships a fixed pdf_oxide.
+
+--- a/src/converters/pdf_to_ir.rs
++++ b/src/converters/pdf_to_ir.rs
+@@ -191,5 +191,5 @@
+     };
+     populate_metadata_from_pdf_info(doc, &mut metadata);
+ 
+-    Ok(DocumentIR { metadata, sections })
++    Ok(DocumentIR { metadata, sections, ..Default::default() })
+ }

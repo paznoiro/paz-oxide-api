@@ -1,0 +1,669 @@
+openapi: 3.1.0
+info:
+  title: Oxide API
+  version: 0.1.0
+  summary: Text and markdown extraction from PDF, Office, OpenDocument and image files, with OCR.
+  description: |
+    One HTTP API that extracts `text` and `markdown` from **PDF**, **Office** (DOCX, XLSX, PPTX,
+    DOC, XLS, PPT), **OpenDocument** (ODT, ODS, ODP) and **image** files (PNG, JPEG, TIFF, WebP,
+    GIF, BMP, JPEG 2000, PNM, TGA). The file type is detected from the content, so one route
+    serves every format.
+
+    PDF pages are classified one by one: pages with a usable text layer are extracted natively,
+    and scanned or legacy-font pages go through OCR (English, Hindi, Arabic) in the same request.
+    Images go straight to OCR, one page per TIFF page; EXIF orientation is honoured. HEIC, AVIF
+    and JPEG XL are recognized but not supported.
+
+    **Input.** Send the document as multipart (`file=<binary>`), as JSON
+    (`{"file_base64": "..."}`), or as the raw request body. Parameters are top-level multipart
+    parts, JSON keys, or query parameters; body parameters override query parameters. Parameters
+    that don't apply to the detected document kind are ignored and listed in `ignored_params`.
+
+    **Output.** JSON by default. `Accept: text/plain` (text endpoint) or `Accept: text/markdown`
+    (markdown endpoint) returns the raw text, with metadata in `X-Oxide-*` headers.
+
+    **Limits.** 32 MiB request body (for JSON this counts the base64 text). 8 requests are
+    processed at once per container; others wait up to 1 s for a slot, then get `429`.
+    Native extraction has a 30 s deadline, requests that OCR any page 120 s, both measured from
+    admission. A PDF or image that runs out of time returns the pages done so far with
+    `incomplete: true`. Images are limited to 64 megapixels per page.
+
+    Errors use RFC 9457 `application/problem+json`.
+  license:
+    name: MIT OR Apache-2.0
+servers:
+  - url: http://localhost:8080
+security:
+  - bearer: []
+tags:
+  - name: extract
+    description: Text, markdown and document info
+  - name: ops
+    description: Health, readiness, version, metrics (unauthenticated)
+paths:
+  /v1/extract/text:
+    post:
+      tags: [extract]
+      operationId: extractText
+      summary: Extract plain text
+      description: |
+        Office and OpenDocument: the document's plain text. PDF: per-page native text, with OCR
+        for pages that need it. Images: OCR text per page. Pages are joined with a blank line.
+      parameters:
+        - $ref: '#/components/parameters/format'
+        - $ref: '#/components/parameters/pages'
+        - $ref: '#/components/parameters/ocr'
+        - $ref: '#/components/parameters/lang'
+        - $ref: '#/components/parameters/filename'
+      requestBody:
+        $ref: '#/components/requestBodies/Document'
+      responses:
+        '200':
+          description: Extracted text
+          headers:
+            X-Engine:
+              $ref: '#/components/headers/X-Engine'
+            Server-Timing:
+              $ref: '#/components/headers/Server-Timing'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PdfExtraction'
+                  - $ref: '#/components/schemas/OfficeExtraction'
+                  - $ref: '#/components/schemas/ImageExtraction'
+                discriminator:
+                  propertyName: kind
+                  mapping:
+                    pdf: '#/components/schemas/PdfExtraction'
+                    office: '#/components/schemas/OfficeExtraction'
+                    image: '#/components/schemas/ImageExtraction'
+            text/plain:
+              schema:
+                type: string
+              description: Raw text; metadata in `X-Oxide-*` headers.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '408': { $ref: '#/components/responses/UploadTimeout' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '503': { $ref: '#/components/responses/Draining' }
+  /v1/extract/markdown:
+    post:
+      tags: [extract]
+      operationId: extractMarkdown
+      summary: Extract markdown
+      description: |
+        Office and OpenDocument: markdown rendering of the document structure (headings, lists,
+        tables). PDF: per-page markdown with heading detection; OCR'd pages and images contribute
+        their lines and paragraphs.
+      parameters:
+        - $ref: '#/components/parameters/format'
+        - $ref: '#/components/parameters/pages'
+        - $ref: '#/components/parameters/ocr'
+        - $ref: '#/components/parameters/lang'
+        - $ref: '#/components/parameters/detect_headings'
+        - $ref: '#/components/parameters/filename'
+      requestBody:
+        $ref: '#/components/requestBodies/Document'
+      responses:
+        '200':
+          description: Extracted markdown
+          headers:
+            X-Engine:
+              $ref: '#/components/headers/X-Engine'
+            Server-Timing:
+              $ref: '#/components/headers/Server-Timing'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PdfExtraction'
+                  - $ref: '#/components/schemas/OfficeExtraction'
+                  - $ref: '#/components/schemas/ImageExtraction'
+                discriminator:
+                  propertyName: kind
+                  mapping:
+                    pdf: '#/components/schemas/PdfExtraction'
+                    office: '#/components/schemas/OfficeExtraction'
+                    image: '#/components/schemas/ImageExtraction'
+            text/markdown:
+              schema:
+                type: string
+              description: Raw markdown; metadata in `X-Oxide-*` headers.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '408': { $ref: '#/components/responses/UploadTimeout' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '503': { $ref: '#/components/responses/Draining' }
+  /v1/info:
+    post:
+      tags: [extract]
+      operationId: documentInfo
+      summary: Document format, metadata and structure
+      description: |
+        Office and OpenDocument: format, core metadata, and structure (sheet names and
+        dimensions, slide count, section count). PDF: metadata, page count, encryption flag and
+        per-page geometry. Images: page count and pixel dimensions, read from the headers only.
+      parameters:
+        - $ref: '#/components/parameters/format'
+        - $ref: '#/components/parameters/filename'
+      requestBody:
+        $ref: '#/components/requestBodies/Document'
+      responses:
+        '200':
+          description: Document info
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PdfInfo'
+                  - $ref: '#/components/schemas/OfficeInfo'
+                  - $ref: '#/components/schemas/ImageInfo'
+                discriminator:
+                  propertyName: kind
+                  mapping:
+                    pdf: '#/components/schemas/PdfInfo'
+                    office: '#/components/schemas/OfficeInfo'
+                    image: '#/components/schemas/ImageInfo'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '408': { $ref: '#/components/responses/UploadTimeout' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '503': { $ref: '#/components/responses/Draining' }
+  /healthz:
+    get:
+      tags: [ops]
+      operationId: healthz
+      summary: Liveness
+      description: Fails (503) only when the watchdog sees a job running longer than 10x its deadline.
+      security: []
+      responses:
+        '200':
+          description: Alive
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Status' }
+        '503':
+          description: Unhealthy; restart the container
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Status' }
+  /readyz:
+    get:
+      tags: [ops]
+      operationId: readyz
+      summary: Readiness
+      description: Ready once startup (including OCR model loading and golden smoke tests) is done; 503 while starting or draining.
+      security: []
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Status' }
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Status' }
+  /version:
+    get:
+      tags: [ops]
+      operationId: version
+      summary: Build, engine versions, limits and OCR status
+      security: []
+      responses:
+        '200':
+          description: Version info
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Version' }
+  /metrics:
+    get:
+      tags: [ops]
+      operationId: metrics
+      summary: Prometheus metrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus text exposition
+          content:
+            text/plain:
+              schema:
+                type: string
+  /openapi.json:
+    get:
+      tags: [ops]
+      operationId: openapiJson
+      summary: This contract as JSON
+      security: []
+      responses:
+        '200':
+          description: OpenAPI document
+          content:
+            application/json:
+              schema:
+                type: object
+  /openapi.yaml:
+    get:
+      tags: [ops]
+      operationId: openapiYaml
+      summary: This contract as YAML
+      security: []
+      responses:
+        '200':
+          description: OpenAPI document
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /docs:
+    get:
+      tags: [ops]
+      operationId: docs
+      summary: Interactive API reference (Scalar, loaded from a CDN)
+      security: []
+      responses:
+        '200':
+          description: HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: The value of `OXIDE_API_API_KEY`.
+  parameters:
+    format:
+      name: format
+      in: query
+      required: false
+      description: |
+        Format hint, used only when the content itself is inconclusive (the content sniff always
+        wins). Aliases are accepted too: template and macro-enabled extensions (`dotx`, `xlsm`,
+        `ott`, ...), `jpg`, `tif`, `pbm`/`pgm`/`ppm`, `j2k`. TGA has no signature, so a TGA needs
+        this hint or a `.tga` filename.
+      schema:
+        type: string
+        enum: [pdf, docx, xlsx, pptx, doc, xls, ppt, odt, ods, odp, png, jpeg, tiff, webp, gif, bmp, jp2, pnm, tga]
+    pages:
+      name: pages
+      in: query
+      required: false
+      description: 'PDF and images (TIFF pages). 1-based pages and ranges, e.g. `1-3,5`.'
+      schema:
+        type: string
+        example: 1-3,5
+    ocr:
+      name: ocr
+      in: query
+      required: false
+      description: |
+        PDF and images. PDF: `auto` OCRs pages classified as scanned, hybrid or set in a legacy
+        Hindi font; `force` OCRs every requested page; `off` skips classification. Images are
+        always OCR'd unless `off`.
+      schema:
+        type: string
+        enum: [auto, force, 'off']
+        default: auto
+    lang:
+      name: lang
+      in: query
+      required: false
+      description: |
+        PDF and images. OCR language. `auto` resolves once per document: legacy Hindi font →
+        `hi`; else the native text's script; else a confidence probe on the first OCR page; else
+        `en`.
+      schema:
+        type: string
+        enum: [auto, en, hi, ar]
+        default: auto
+    detect_headings:
+      name: detect_headings
+      in: query
+      required: false
+      description: PDF markdown only. Detect headings from font size and weight.
+      schema:
+        type: boolean
+        default: true
+    filename:
+      name: filename
+      in: query
+      required: false
+      description: Original filename; its extension is the last-resort format hint (after the content and `format`).
+      schema:
+        type: string
+  requestBodies:
+    Document:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            required: [file]
+            properties:
+              file:
+                type: string
+                format: binary
+                description: The document.
+              format: { type: string }
+              pages: { type: string }
+              ocr: { type: string }
+              lang: { type: string }
+              detect_headings: { type: string }
+        application/json:
+          schema:
+            type: object
+            required: [file_base64]
+            properties:
+              file_base64:
+                type: string
+                description: Base64 (standard or URL-safe; a `data:` URI prefix is accepted).
+              format: { type: string }
+              pages: { type: string }
+              ocr: { type: string }
+              lang: { type: string }
+              detect_headings: { type: boolean }
+              filename: { type: string }
+            additionalProperties:
+              description: Parameters are top-level scalars, never nested.
+        application/octet-stream:
+          schema:
+            type: string
+            format: binary
+          description: Any other content type is treated as the raw document.
+  headers:
+    X-Engine:
+      description: |
+        Engine and version: `pdf_oxide/0.3.78` (PDFs, and image OCR), `office_oxide/0.1.13`
+        (DOCX/XLSX/PPTX/DOC/XLS/PPT) or `oxide-api/0.1.0` (OpenDocument, image info).
+      schema: { type: string }
+    Server-Timing:
+      description: '`queue`, `parse`, `extract` and (when OCR ran) `ocr` durations in ms.'
+      schema: { type: string }
+  responses:
+    BadRequest:
+      description: Malformed input or an invalid parameter (the problem names the accepted values).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or wrong bearer token.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UploadTimeout:
+      description: The request body took longer than 30 s to arrive.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    TooLarge:
+      description: The request body is over the 32 MiB limit.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unprocessable:
+      description: |
+        Unsupported, corrupt or encrypted document (`encrypted-document`, `corrupt-document`,
+        `unsupported-format`, `too-many-pages`, `image-too-large`), a processing timeout
+        (`processing-timeout`), or every page's OCR failing with `ocr=force` or on an image
+        (`ocr-failed`).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Busy:
+      description: No processing slot became free within 1 s. Honour `Retry-After`.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Draining:
+      description: The instance is shutting down.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    FormatSource:
+      type: string
+      enum: [sniff, param, filename]
+      description: How the format was determined.
+    PdfExtraction:
+      type: object
+      required: [kind, format, format_source, text, char_count, truncated, page_count, pages_extracted, incomplete, ocr]
+      properties:
+        kind: { type: string, const: pdf }
+        format: { type: string, const: pdf }
+        format_source: { $ref: '#/components/schemas/FormatSource' }
+        text: { type: string }
+        char_count: { type: integer, description: Unicode scalar values in `text`. }
+        truncated: { type: boolean, description: The 4 Mi-character output budget ran out. }
+        page_count: { type: integer }
+        pages_extracted:
+          type: array
+          items: { type: integer }
+          description: 1-based pages whose text is in `text`.
+        incomplete:
+          type: boolean
+          description: The deadline passed; request the missing pages with `pages=`.
+        ocr: { $ref: '#/components/schemas/OcrInfo' }
+        failed_pages:
+          type: array
+          items: { type: integer }
+          description: Pages whose native text could not be extracted (omitted when empty).
+        ignored_params:
+          type: array
+          items: { type: string }
+          description: Parameters that don't apply to this document (omitted when empty).
+    OcrInfo:
+      type: object
+      required: [status, pages, pages_needing_ocr, failed_pages]
+      properties:
+        status:
+          type: string
+          enum: [native, ocr, hybrid, unavailable, 'off']
+          description: |
+            `native`: no page needed OCR. `ocr`: every page came from OCR. `hybrid`: a mix, or
+            native text plus OCR lines. `unavailable`: OCR was needed but isn't available here
+            (models not loaded, or the language isn't available). `off`: `ocr=off`.
+        lang:
+          type: string
+          enum: [en, hi, ar]
+        lang_source:
+          type: string
+          enum: [param, font, text, probe, default]
+        pages:
+          type: array
+          items: { type: integer }
+          description: Pages whose output includes OCR text.
+        pages_needing_ocr:
+          type: array
+          items: { type: integer }
+          description: Pages that need OCR but didn't get it (OCR unavailable for them).
+        failed_pages:
+          type: array
+          items: { type: integer }
+          description: Pages whose OCR failed; they carry native text, or none when the page's OCR layer was junk.
+        reasons:
+          type: array
+          description: Why each page was routed to OCR (omitted when none was).
+          items:
+            type: object
+            required: [page, reason]
+            properties:
+              page: { type: integer }
+              reason:
+                type: string
+                enum: [scanned, hybrid, legacy_font, forced, image]
+    OfficeExtraction:
+      type: object
+      required: [kind, format, format_source, text, char_count, truncated]
+      properties:
+        kind: { type: string, const: office }
+        format:
+          type: string
+          enum: [docx, xlsx, pptx, doc, xls, ppt, odt, ods, odp]
+        format_source: { $ref: '#/components/schemas/FormatSource' }
+        text: { type: string }
+        char_count: { type: integer }
+        truncated: { type: boolean }
+        ignored_params:
+          type: array
+          items: { type: string }
+    ImageExtraction:
+      type: object
+      description: Same shape as a PDF extraction; every page comes from OCR.
+      required: [kind, format, format_source, text, char_count, truncated, page_count, pages_extracted, incomplete, ocr]
+      properties:
+        kind: { type: string, const: image }
+        format:
+          type: string
+          enum: [png, jpeg, tiff, webp, gif, bmp, jp2, pnm, tga]
+        format_source: { $ref: '#/components/schemas/FormatSource' }
+        text: { type: string }
+        char_count: { type: integer }
+        truncated: { type: boolean }
+        page_count: { type: integer, description: TIFF pages; 1 for other formats. }
+        pages_extracted:
+          type: array
+          items: { type: integer }
+        incomplete: { type: boolean }
+        ocr: { $ref: '#/components/schemas/OcrInfo' }
+        failed_pages:
+          type: array
+          items: { type: integer }
+        ignored_params:
+          type: array
+          items: { type: string }
+    PdfInfo:
+      type: object
+      required: [kind, format, format_source, version, page_count, encrypted, metadata, pages]
+      properties:
+        kind: { type: string, const: pdf }
+        format: { type: string, const: pdf }
+        format_source: { $ref: '#/components/schemas/FormatSource' }
+        version: { type: string, example: '1.7' }
+        page_count: { type: integer }
+        encrypted: { type: boolean }
+        metadata:
+          type: object
+          properties:
+            title: { type: string }
+            author: { type: string }
+            subject: { type: string }
+            keywords: { type: string }
+            creator: { type: string }
+            producer: { type: string }
+            created: { type: string }
+            modified: { type: string }
+        pages:
+          type: array
+          items:
+            type: object
+            required: [page, width, height, rotation]
+            properties:
+              page: { type: integer }
+              width: { type: number, description: Points. }
+              height: { type: number, description: Points. }
+              rotation: { type: integer, enum: [0, 90, 180, 270] }
+        ignored_params:
+          type: array
+          items: { type: string }
+    OfficeInfo:
+      type: object
+      required: [kind, format, format_source, metadata]
+      properties:
+        kind: { type: string, const: office }
+        format:
+          type: string
+          enum: [docx, xlsx, pptx, doc, xls, ppt, odt, ods, odp]
+        format_source: { $ref: '#/components/schemas/FormatSource' }
+        metadata:
+          type: object
+          description: Core properties (title, author, created, modified, ...).
+        sheets:
+          type: array
+          description: Spreadsheets only.
+          items:
+            type: object
+            required: [name, rows, cols]
+            properties:
+              name: { type: string }
+              rows: { type: integer }
+              cols: { type: integer }
+        slide_count:
+          type: integer
+          description: Presentations only.
+        section_count:
+          type: integer
+          description: Word-processing documents only.
+        ignored_params:
+          type: array
+          items: { type: string }
+    ImageInfo:
+      type: object
+      required: [kind, format, format_source, page_count, pages]
+      properties:
+        kind: { type: string, const: image }
+        format:
+          type: string
+          enum: [png, jpeg, tiff, webp, gif, bmp, jp2, pnm, tga]
+        format_source: { $ref: '#/components/schemas/FormatSource' }
+        page_count: { type: integer }
+        pages:
+          type: array
+          items:
+            type: object
+            required: [page, width, height]
+            properties:
+              page: { type: integer }
+              width: { type: integer, description: Pixels, as stored (before EXIF orientation). }
+              height: { type: integer, description: Pixels, as stored. }
+        ignored_params:
+          type: array
+          items: { type: string }
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required: [type, title, status, detail]
+      properties:
+        type: { type: string, example: /problems/encrypted-document }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        parameter: { type: string, description: The offending parameter (400 only). }
+        accepted: { type: string, description: Accepted values (400 only). }
+        limit_pixels: { type: integer, description: The per-page pixel limit (`image-too-large` only). }
+    Status:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string }
+        reason: { type: string }
+    Version:
+      type: object
+      required: [name, version, engines, limits, ocr]
+      properties:
+        name: { type: string }
+        version: { type: string }
+        engines:
+          type: object
+          properties:
+            pdf_oxide: { type: string }
+            office_oxide: { type: string }
+        uptime_secs: { type: integer }
+        limits: { type: object }
+        auth: { type: boolean }
+        ocr:
+          type: object
+          description: OCR status; per-language `available` or `{status, reason}`.
