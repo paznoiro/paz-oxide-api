@@ -13,6 +13,20 @@ The image is `distroless/cc` with ONNX Runtime 1.28.3, the PaddleOCR models and 
 page rendering: ≈ 103 MB, 55 MB compressed. It runs as UID 65532 with a read-only root filesystem,
 no shell, and a built-in `healthcheck`.
 
+## Container images (GHCR)
+
+Every published GitHub Release builds a multi-arch (`linux/amd64`, `linux/arm64`)
+image and pushes it to GHCR (workflow: `.github/workflows/docker-release.yml`).
+Release notes also carry the exact `docker pull` lines under "Container image (GHCR)".
+
+```sh
+docker pull ghcr.io/paznoiro/oxide-api:0.1.0
+docker run -p 8080:8080 -e OXIDE_API_API_KEY=$OXIDE_API_API_KEY --read-only ghcr.io/paznoiro/oxide-api:0.1.0
+```
+
+Stable releases are additionally tagged `:latest`. Browse all versions at
+<https://github.com/paznoiro/paz-oxide-api/pkgs/container/oxide-api>.
+
 ## Quickstart
 
 ```sh
