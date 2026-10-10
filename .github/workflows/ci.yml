@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.92
       - run: ./scripts/vendor_pdf_oxide.sh
       - run: cargo check --all-targets && cargo check --all-targets --no-default-features
 

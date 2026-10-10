@@ -357,7 +357,7 @@ strip = "symbols"
 panic = "unwind"        # LOAD-BEARING: catch_unwind in the worker pools
 ```
 
-- MSRV **1.88** (both engines). CI checks MSRV; images build with current stable.
+- MSRV **1.92** (both engines). CI checks MSRV; images build with current stable.
 - No UPX: packed binaries decompress into anonymous memory on every start.
 - The builder and runtime images are pinned by digest. Renovate bumps the digests.
 
