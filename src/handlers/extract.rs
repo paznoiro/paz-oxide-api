@@ -22,7 +22,7 @@ use crate::pdf::route::{OcrMode, OcrReason};
 use crate::pdf::{self, Mode, Phase1};
 use crate::raster::ImageFormat;
 use crate::respond::{self, Engine, Output, Timing};
-use crate::text::{TextBudget, normalize_arabic_forms};
+use crate::text::{TextBudget, collapse_whitespace, normalize_arabic_forms};
 
 /// Slack for a page already in progress when its deadline passes.
 const GRACE: Duration = Duration::from_secs(2);
@@ -56,11 +56,15 @@ struct ExtractParams {
     ocr: OcrMode,
     lang: LangParam,
     detect_headings: bool,
+    clean: bool,
     provided: Vec<String>,
 }
 
 /// Params for paged kinds (PDF, images).
 const PAGED_PARAMS: [&str; 3] = ["pages", "ocr", "lang"];
+
+/// Params that apply to every extraction (any kind, both endpoints).
+const EXTRACT_PARAMS: [&str; 1] = ["clean"];
 
 impl ExtractParams {
     fn parse(p: &Params) -> Result<Self, ApiError> {
@@ -79,7 +83,8 @@ impl ExtractParams {
             .transpose()?
             .unwrap_or(LangParam::Auto);
         let detect_headings = p.get("detect_headings").map(|v| parse_bool("detect_headings", v)).transpose()?.unwrap_or(true);
-        Ok(Self { format: format_param(p)?, pages, ocr, lang, detect_headings, provided: p.keys().cloned().collect() })
+        let clean = p.get("clean").map(|v| parse_bool("clean", v)).transpose()?.unwrap_or(false);
+        Ok(Self { format: format_param(p)?, pages, ocr, lang, detect_headings, clean, provided: p.keys().cloned().collect() })
     }
 
     /// Params that don't apply to the detected kind (or aren't known at all).
@@ -89,6 +94,7 @@ impl ExtractParams {
             .filter(|k| {
                 let k = k.as_str();
                 let applies = COMMON_PARAMS.contains(&k)
+                    || EXTRACT_PARAMS.contains(&k)
                     || (kind.is_paged() && PAGED_PARAMS.contains(&k))
                     || (kind == DocKind::Pdf && ep == Endpoint::Markdown && k == "detect_headings");
                 !applies
@@ -116,7 +122,7 @@ async fn extract(st: Arc<AppState>, mut req: Request, ep: Endpoint) -> Result<Re
         Endpoint::Text => Mode::Text,
         Endpoint::Markdown => Mode::Markdown { detect_headings: params.detect_headings },
     };
-    let ctx = Ctx { st, admitted, output, source: detected.source, ignored };
+    let ctx = Ctx { st, admitted, output, source: detected.source, ignored, clean: params.clean };
     match detected.kind {
         DocKind::Office(fmt) => office_flow(ctx, input.bytes, fmt, mode).await,
         DocKind::Pdf => pdf_flow(ctx, input.bytes, &params, mode).await,
@@ -130,6 +136,7 @@ struct Ctx {
     output: Output,
     source: FormatSource,
     ignored: Vec<String>,
+    clean: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +158,7 @@ struct OfficeResponse<'a> {
 async fn office_flow(ctx: Ctx, bytes: Bytes, fmt: OfficeFormat, mode: Mode) -> Result<Response, ApiError> {
     let deadline = ctx.admitted.admitted_at + ctx.st.cfg.process_timeout;
     let max_chars = ctx.st.cfg.max_text_chars;
+    let clean = ctx.clean;
     let rx = ctx.st.cpu.spawn(ctx.admitted.permit.clone(), ctx.st.cfg.process_timeout, move || {
         let t = Instant::now();
         let (text, cut_short) = crate::office::extract(bytes, fmt, mode, max_chars)?;
@@ -158,6 +166,7 @@ async fn office_flow(ctx: Ctx, bytes: Bytes, fmt: OfficeFormat, mode: Mode) -> R
         let t = Instant::now();
         let mut budget = TextBudget::new(max_chars);
         let text = budget.take(normalize_arabic_forms(text));
+        let text = if clean { collapse_whitespace(&text) } else { text };
         Ok((text, budget.truncated || cut_short, parse, t.elapsed()))
     });
     let (text, truncated, parse, extract) = await_job(rx, deadline).await?;
@@ -519,6 +528,7 @@ fn finish(ctx: Ctx, p1: Phase1, p2: Phase2, reasons: Vec<PageReason>, kind: DocK
         text.push_str(&piece);
     }
     let text = normalize_arabic_forms(text);
+    let text = if ctx.clean { collapse_whitespace(&text) } else { text };
     let truncated = p1_truncated || budget.truncated;
 
     let ocr_pages: Vec<usize> = out_pages.iter().filter(|p| p.ocr_applied).map(|p| p.index + 1).collect();

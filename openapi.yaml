@@ -54,6 +54,7 @@ paths:
         - $ref: '#/components/parameters/pages'
         - $ref: '#/components/parameters/ocr'
         - $ref: '#/components/parameters/lang'
+        - $ref: '#/components/parameters/clean'
         - $ref: '#/components/parameters/filename'
       requestBody:
         $ref: '#/components/requestBodies/Document'
@@ -104,6 +105,7 @@ paths:
         - $ref: '#/components/parameters/ocr'
         - $ref: '#/components/parameters/lang'
         - $ref: '#/components/parameters/detect_headings'
+        - $ref: '#/components/parameters/clean'
         - $ref: '#/components/parameters/filename'
       requestBody:
         $ref: '#/components/requestBodies/Document'
@@ -335,6 +337,18 @@ components:
       schema:
         type: boolean
         default: true
+    clean:
+      name: clean
+      in: query
+      required: false
+      description: |
+        Any document. When `true`, extra whitespace is collapsed: runs of spaces and tabs
+        become a single space, trailing whitespace on each line is removed, 3+ newlines
+        become a single blank line, and leading/trailing blank lines are trimmed.
+        Markdown code-block indentation is collapsed to a single space.
+      schema:
+        type: boolean
+        default: false
     filename:
       name: filename
       in: query
@@ -360,6 +374,7 @@ components:
               ocr: { type: string }
               lang: { type: string }
               detect_headings: { type: string }
+              clean: { type: string }
         application/json:
           schema:
             type: object
@@ -373,6 +388,7 @@ components:
               ocr: { type: string }
               lang: { type: string }
               detect_headings: { type: boolean }
+              clean: { type: boolean }
               filename: { type: string }
             additionalProperties:
               description: Parameters are top-level scalars, never nested.

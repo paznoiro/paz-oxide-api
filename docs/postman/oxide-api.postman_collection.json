@@ -34,7 +34,7 @@
         {
           "name": "POST /v1/extract/text (multipart)",
           "request": {
-            "description": "Plain text from any supported file. Office and OpenDocument: the document's text. PDF: per-page native text, with OCR for pages that need it. Images: OCR text per page. Multipart is preferred for large files.\n\nOptional query params: `pages=1-3,5`, `ocr=auto|force|off`, `lang=auto|en|hi|ar` (PDFs and images), `format=pdf|docx|xlsx|pptx|doc|xls|ppt|odt|ods|odp|png|jpeg|tiff|webp|gif|bmp|jp2|pnm|tga`, `filename=report.pdf`.",
+            "description": "Plain text from any supported file. Office and OpenDocument: the document's text. PDF: per-page native text, with OCR for pages that need it. Images: OCR text per page. Multipart is preferred for large files.\n\nOptional query params: `pages=1-3,5`, `ocr=auto|force|off`, `lang=auto|en|hi|ar` (PDFs and images), `format=pdf|docx|xlsx|pptx|doc|xls|ppt|odt|ods|odp|png|jpeg|tiff|webp|gif|bmp|jp2|pnm|tga`, `filename=report.pdf`, `clean=true|false` (any: collapse extra spaces/tabs and blank lines).",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -203,7 +203,7 @@
         {
           "name": "POST /v1/extract/markdown (multipart)",
           "request": {
-            "description": "Office and OpenDocument: headings, lists, tables (one table per sheet, one section per slide). PDF: per-page markdown with heading detection. Images: OCR lines and paragraphs. Extra param vs text: `detect_headings=true|false` (PDF only).",
+            "description": "Office and OpenDocument: headings, lists, tables (one table per sheet, one section per slide). PDF: per-page markdown with heading detection. Images: OCR lines and paragraphs. Extra param vs text: `detect_headings=true|false` (PDF only), `clean=true|false` (any).",
             "auth": {
               "type": "bearer",
               "bearer": [

@@ -106,6 +106,7 @@ Parameters (query string, multipart parts or JSON keys; never nested):
 | `ocr` | PDF, images | `auto` (default), `force`, `off` |
 | `lang` | PDF, images | `auto` (default), `en`, `hi`, `ar` |
 | `detect_headings` | PDF markdown | `true` (default) / `false` |
+| `clean` | any extraction | `false` (default) / `true`: collapse extra spaces/tabs to one space, trailing whitespace removed, 3+ newlines to one blank line |
 | `filename` | any | last-resort format hint from the extension |
 
 Parameters that don't apply to the detected document kind are ignored and listed in

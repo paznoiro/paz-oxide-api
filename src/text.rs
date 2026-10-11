@@ -162,6 +162,55 @@ impl TextBudget {
     }
 }
 
+/// Collapses extra whitespace for `clean=true`: runs of horizontal
+/// whitespace (spaces, tabs and other Unicode spaces, never newlines)
+/// become a single ASCII space, trailing whitespace on each line is
+/// removed, blank lines become truly empty, 3+ newlines collapse to a
+/// single blank line, and leading/trailing blank lines are trimmed.
+/// Single leading spaces are kept (so indented lines stay indented),
+/// except on the first/last line where the final trim removes them.
+pub fn collapse_whitespace(s: &str) -> String {
+    let s = s.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines = Vec::new();
+    for line in s.split('\n') {
+        let mut out = String::with_capacity(line.len());
+        let mut in_ws = false;
+        for c in line.chars() {
+            if c.is_whitespace() {
+                if !in_ws {
+                    out.push(' ');
+                    in_ws = true;
+                }
+            } else {
+                out.push(c);
+                in_ws = false;
+            }
+        }
+        let trimmed = out.trim_end();
+        if trimmed.trim().is_empty() {
+            lines.push(String::new());
+        } else {
+            lines.push(trimmed.to_string());
+        }
+    }
+    let joined = lines.join("\n");
+    // Cap blank runs at one blank line (two newlines).
+    let mut out = String::with_capacity(joined.len());
+    let mut newlines = 0usize;
+    for c in joined.chars() {
+        if c == '\n' {
+            newlines += 1;
+            if newlines <= 2 {
+                out.push(c);
+            }
+        } else {
+            newlines = 0;
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
+}
+
 /// Upstream's hybrid merge rule, reimplemented: keep the native text and
 /// append OCR lines not already contained in it (whitespace-normalized,
 /// case-insensitive), de-duplicated within the OCR block itself.
@@ -252,5 +301,24 @@ mod tests {
         assert_eq!(merge_native_and_ocr(native, ocr), "Invoice 42\nTotal due: 100\nStamp: PAID");
         assert_eq!(merge_native_and_ocr("", "a"), "a");
         assert_eq!(merge_native_and_ocr("a", " "), "a");
+    }
+
+    #[test]
+    fn whitespace_collapse() {
+        assert_eq!(collapse_whitespace("Hello    World"), "Hello World");
+        assert_eq!(collapse_whitespace("Hello\t\tWorld"), "Hello World");
+        assert_eq!(collapse_whitespace("Hello   \n   World"), "Hello\n World");
+        assert_eq!(collapse_whitespace("a\n\n\n\nb"), "a\n\nb");
+        assert_eq!(collapse_whitespace("a\n   \n\n   \nb"), "a\n\nb");
+        assert_eq!(collapse_whitespace("\n\n  Hello  \n\n"), "Hello");
+        assert_eq!(collapse_whitespace("line with trailing   "), "line with trailing");
+        assert_eq!(collapse_whitespace("a\r\n\r\n\r\nb"), "a\n\nb");
+        assert_eq!(collapse_whitespace("a\rb"), "a\nb");
+        assert_eq!(collapse_whitespace(""), "");
+        assert_eq!(collapse_whitespace("   \n  \n "), "");
+        // Unicode spaces collapse to a single ASCII space.
+        assert_eq!(collapse_whitespace("Hello\u{00A0}\u{00A0}World"), "Hello World");
+        // Already-clean text is unchanged.
+        assert_eq!(collapse_whitespace("a\n\nb\nc"), "a\n\nb\nc");
     }
 }

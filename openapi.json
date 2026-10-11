@@ -52,6 +52,9 @@
             "$ref": "#/components/parameters/lang"
           },
           {
+            "$ref": "#/components/parameters/clean"
+          },
+          {
             "$ref": "#/components/parameters/filename"
           }
         ],
@@ -148,6 +151,9 @@
           },
           {
             "$ref": "#/components/parameters/detect_headings"
+          },
+          {
+            "$ref": "#/components/parameters/clean"
           },
           {
             "$ref": "#/components/parameters/filename"
@@ -562,6 +568,16 @@
           "default": true
         }
       },
+      "clean": {
+        "name": "clean",
+        "in": "query",
+        "required": false,
+        "description": "Any document. When `true`, extra whitespace is collapsed: runs of spaces and tabs\nbecome a single space, trailing whitespace on each line is removed, 3+ newlines\nbecome a single blank line, and leading/trailing blank lines are trimmed.\nMarkdown code-block indentation is collapsed to a single space.\n",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
       "filename": {
         "name": "filename",
         "in": "query",
@@ -602,6 +618,9 @@
                 },
                 "detect_headings": {
                   "type": "string"
+                },
+                "clean": {
+                  "type": "string"
                 }
               }
             }
@@ -630,6 +649,9 @@
                   "type": "string"
                 },
                 "detect_headings": {
+                  "type": "boolean"
+                },
+                "clean": {
                   "type": "boolean"
                 },
                 "filename": {

@@ -232,6 +232,30 @@ async fn ignored_params_are_listed() {
 }
 
 #[tokio::test]
+async fn clean_param_collapses_whitespace() {
+    let app = app();
+    let pdf = fixture("native.pdf");
+    // `clean` applies to every extraction, so it is never ignored there.
+    let r = send(&app, raw_req("/v1/extract/text?clean=true", pdf.clone())).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert!(r.json().get("ignored_params").is_none());
+    let r_office = send(&app, raw_req("/v1/extract/text?clean=true", fixture("sample.docx"))).await;
+    assert!(r_office.json().get("ignored_params").is_none());
+    // Already-clean output is unchanged by `clean`.
+    let plain = send(&app, raw_req("/v1/extract/text", pdf.clone())).await.json();
+    let cleaned = send(&app, raw_req("/v1/extract/text?clean=true", pdf.clone())).await.json();
+    assert_eq!(plain["text"], cleaned["text"]);
+    // Markdown and the JSON body channel accept it too.
+    let r = send(&app, raw_req("/v1/extract/markdown?clean=true", pdf.clone())).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let r = send(&app, json_req("/v1/extract/text", &pdf, json!({"clean": true}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    // ... but `/v1/info` has no text to clean, so it is ignored there.
+    let r = send(&app, raw_req("/v1/info?clean=true", pdf.clone())).await;
+    assert_eq!(r.json()["ignored_params"], json!(["clean"]));
+}
+
+#[tokio::test]
 async fn opendocument_structure() {
     let app = app();
     let r = send(&app, raw_req("/v1/extract/markdown", fixture("sample.odt"))).await;
@@ -509,7 +533,7 @@ async fn auth_is_required_on_v1_only() {
 async fn bad_params_are_400() {
     let app = app();
     let pdf = fixture("native.pdf");
-    for (q, param) in [("lang=fr", "lang"), ("ocr=maybe", "ocr"), ("pages=0", "pages"), ("format=rtf", "format"), ("detect_headings=perhaps", "detect_headings")] {
+    for (q, param) in [("lang=fr", "lang"), ("ocr=maybe", "ocr"), ("pages=0", "pages"), ("format=rtf", "format"), ("detect_headings=perhaps", "detect_headings"), ("clean=maybe", "clean")] {
         let r = send(&app, raw_req(&format!("/v1/extract/text?{q}"), pdf.clone())).await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST, "{q}");
         let j = r.json();
