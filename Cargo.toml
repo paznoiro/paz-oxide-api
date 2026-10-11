@@ -1,6 +1,6 @@
 [package]
 name = "oxide-api"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Lightweight HTTP API that extracts text and markdown from PDF, Office and OpenDocument files, with OCR for scanned PDFs and images (en, hi, ar)"

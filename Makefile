@@ -16,7 +16,7 @@ lint:
 	  cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --no-default-features -- -D warnings'
 
 image:
-	docker build -t paz-oxide-api:latest -t paz-oxide-api:0.1.0 .
+	docker build -t paz-oxide-api:latest -t paz-oxide-api:0.2.0 .
 
 fixtures:
 	./scripts/gen_fixtures.sh

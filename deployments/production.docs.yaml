@@ -50,6 +50,6 @@ healthcheck:
 # container, so any OXIDE_API_* setting from the README can be added here.
 env:
   IMAGE_REPO: ghcr.io/zaporion/oxide-api
-  IMAGE_TAG: 0.1.0
+  IMAGE_TAG: 0.2.0
   OXIDE_API_API_KEY: ${OXIDE_API_API_KEY}
   OXIDE_API_OCR_TIMEOUT_SECS: "90"

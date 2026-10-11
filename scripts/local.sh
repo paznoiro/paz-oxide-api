@@ -19,7 +19,7 @@ dotenv_key() {
 }
 
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/zaporion/oxide-api}"
-IMAGE_TAG="${IMAGE_TAG:-0.1.0}"
+IMAGE_TAG="${IMAGE_TAG:-0.2.0}"
 OXIDE_API_PORT="${OXIDE_API_PORT:-8080}"
 OXIDE_API_API_KEY="${OXIDE_API_API_KEY:-$(dotenv_key)}"
 OXIDE_API_API_KEY="${OXIDE_API_API_KEY:-local-dev-key-not-secret-12345678}"
