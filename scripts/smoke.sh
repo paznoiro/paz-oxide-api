@@ -5,7 +5,10 @@
 # Needs curl and python3. Reads OXIDE_API_API_KEY from the env or .env.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-[ -z "${OXIDE_API_API_KEY:-}" ] && [ -f .env ] && . ./.env
+# Read literally, never sourced: a `$` in the key must survive.
+if [ -z "${OXIDE_API_API_KEY:-}" ] && [ -f .env ]; then
+  OXIDE_API_API_KEY="$(sed -n 's/^OXIDE_API_API_KEY=//p' .env | tail -n 1 | tr -d '\r')"
+fi
 KEY=${OXIDE_API_API_KEY:?set OXIDE_API_API_KEY}
 URL=${URL:-http://localhost:8080}
 F=tests/fixtures

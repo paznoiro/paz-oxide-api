@@ -18,13 +18,21 @@ dotenv_key() {
   sed -n 's/^OXIDE_API_API_KEY=//p' .env | tail -n 1 | tr -d '\r'
 }
 
-IMAGE_REPO="${IMAGE_REPO:-ghcr.io/zaporion/oxide-api}"
+# Key from the previous local run, so restarts keep working when the key
+# came from the shell once and is no longer exported.
+env_file_key() {
+  [ -n "${ENV_FILE:-}" ] && [ -f "$ENV_FILE" ] || return 0
+  sed -n 's/^OXIDE_API_API_KEY=//p' "$ENV_FILE" | tail -n 1 | tr -d '\r'
+}
+
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/paznoiro/paz-oxide-api}"
 IMAGE_TAG="${IMAGE_TAG:-0.2.0}"
 OXIDE_API_PORT="${OXIDE_API_PORT:-8080}"
+ENV_FILE="${ZAP_ENV_FILE:-.oxide-local.env}"
 OXIDE_API_API_KEY="${OXIDE_API_API_KEY:-$(dotenv_key)}"
+OXIDE_API_API_KEY="${OXIDE_API_API_KEY:-$(env_file_key)}"
 OXIDE_API_API_KEY="${OXIDE_API_API_KEY:-local-dev-key-not-secret-12345678}"
 OXIDE_API_OCR_TIMEOUT_SECS="${OXIDE_API_OCR_TIMEOUT_SECS:-90}"
-ENV_FILE="${ZAP_ENV_FILE:-.oxide-local.env}"
 
 if [ "${1:-up}" = "down" ]; then
   docker rm -f oxide-api >/dev/null 2>&1 || true
@@ -45,6 +53,16 @@ fi
 export IMAGE_REPO IMAGE_TAG
 export ZAP_ENV_FILE="$ENV_FILE"
 docker network create web >/dev/null 2>&1 || true
+
+# Use the published image when it exists; otherwise build it from this
+# checkout (e.g. an unreleased tag that was never pushed to GHCR).
+IMAGE_REF="$IMAGE_REPO:$IMAGE_TAG"
+if ! docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
+  if ! docker pull "$IMAGE_REF"; then
+    echo "image $IMAGE_REF not on GHCR, building locally..." >&2
+    docker build -t "$IMAGE_REF" .
+  fi
+fi
 
 # Publish :8080 only for the local run. The server compose exposes the port
 # on the `web` network with no host mapping; Caddy stays the only entrypoint.

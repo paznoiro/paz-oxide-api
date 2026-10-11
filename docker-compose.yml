@@ -8,7 +8,7 @@
 # ZAP_ENV_FILE, so the API key never touches the server's disk.
 services:
   oxide-api:
-    image: ${IMAGE_REPO:-ghcr.io/zaporion/oxide-api}:${IMAGE_TAG:-0.2.0}
+    image: ${IMAGE_REPO:-ghcr.io/paznoiro/paz-oxide-api}:${IMAGE_TAG:-0.2.0}
     container_name: oxide-api
     restart: unless-stopped
     # SIGTERM fails /readyz and lets in-flight requests finish; an OCR request

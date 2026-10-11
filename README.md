@@ -229,7 +229,7 @@ owner-password-only PDF opens normally.
 | File | Purpose |
 |---|---|
 | `deployments/production.docs.yaml` | target host, domain, image and `OXIDE_API_*` settings |
-| `docker-compose.yml` | the server compose: pulls `ghcr.io/zaporion/oxide-api`, no host port, hardened (local run: `./scripts/local.sh`) |
+| `docker-compose.yml` | the server compose: pulls `ghcr.io/paznoiro/paz-oxide-api`, no host port, hardened (local run: `./scripts/local.sh`) |
 | `deployments/caddy-sites/oxide-api.caddy` | Caddy site: TLS, 40 MB body cap, `/metrics` kept off the internet |
 | `scripts/local.sh` | local run of the server compose on `localhost:8080`, no SSH or Caddy |
 

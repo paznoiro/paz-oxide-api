@@ -110,7 +110,7 @@ FROM ${CC_BASE} AS runtime
 ARG ORT_VERSION
 LABEL org.opencontainers.image.title="oxide-api" \
       org.opencontainers.image.description="Text and markdown extraction from PDF, Office, OpenDocument and image files, with OCR (en, hi, ar)" \
-      org.opencontainers.image.source="https://github.com/OWNER/oxide-api" \
+      org.opencontainers.image.source="https://github.com/paznoiro/paz-oxide-api" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0" \
       org.opencontainers.image.version="0.2.0" \
       dev.oxide-api.pdf-oxide="0.3.78+patched" \

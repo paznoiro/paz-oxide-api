@@ -6,16 +6,25 @@ set -eu
 DEST=${1:-models}
 mkdir -p "$DEST"
 
+# Portable sha256: GNU sha256sum on Linux, shasum on stock macOS.
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  else
+    shasum -a 256 "$@"
+  fi
+}
+
 DEEPGHS=https://huggingface.co/deepghs/paddleocr/resolve/e7bd63d9c674c96bd4fdab435af0efb383919c18
 MONKT=https://huggingface.co/monkt/paddleocr-onnx/resolve/7b02d0a30a07ba2b92ad1ff5a8941ae2c633de65
 PADDLE=https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/ppocr/utils/dict
 
 fetch() { # <file> <sha256> <url>
-  if [ -f "$DEST/$1" ] && echo "$2  $DEST/$1" | sha256sum -c - >/dev/null 2>&1; then
+  if [ -f "$DEST/$1" ] && echo "$2  $DEST/$1" | sha256 -c - >/dev/null 2>&1; then
     return 0
   fi
   curl -fsSL --retry 3 -o "$DEST/$1.part" "$3"
-  echo "$2  $DEST/$1.part" | sha256sum -c - >/dev/null || { echo "sha256 mismatch: $1" >&2; exit 1; }
+  echo "$2  $DEST/$1.part" | sha256 -c - >/dev/null || { echo "sha256 mismatch: $1" >&2; exit 1; }
   mv "$DEST/$1.part" "$DEST/$1"
   echo "fetched $1"
 }

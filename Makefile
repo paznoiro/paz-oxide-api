@@ -28,4 +28,4 @@ up:
 	./scripts/local.sh
 
 down:
-	docker compose down
+	./scripts/local.sh down
