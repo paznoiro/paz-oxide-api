@@ -20,12 +20,12 @@ image and pushes it to GHCR (workflow: `.github/workflows/docker-release.yml`).
 Release notes also carry the exact `docker pull` lines under "Container image (GHCR)".
 
 ```sh
-docker pull ghcr.io/paznoiro/oxide-api:0.1.0
-docker run -p 8080:8080 -e OXIDE_API_API_KEY=$OXIDE_API_API_KEY --read-only ghcr.io/paznoiro/oxide-api:0.1.0
+docker pull ghcr.io/paznoiro/paz-oxide-api:0.1.0
+docker run -p 8080:8080 -e OXIDE_API_API_KEY=$OXIDE_API_API_KEY --read-only ghcr.io/paznoiro/paz-oxide-api:0.1.0
 ```
 
 Stable releases are additionally tagged `:latest`. Browse all versions at
-<https://github.com/paznoiro/paz-oxide-api/pkgs/container/oxide-api>.
+<https://github.com/paznoiro/paz-oxide-api/pkgs/container/paz-oxide-api>.
 
 ## Quickstart
 
@@ -260,7 +260,7 @@ No local Rust is needed: everything runs in containers.
 ```sh
 make test         # unit + API + OCR tests; fetches ONNX Runtime + models (sha256-pinned) once
 make lint         # clippy -D warnings, with and without the `ocr` feature
-make image        # oxide-api:latest
+make image        # paz-oxide-api:latest
 make smoke        # end-to-end checks against the running container (curl + python3)
 make fixtures     # regenerate tests/fixtures and the OCR golden images (LibreOffice, Noto, qpdf)
 make openapi      # regenerate openapi.json from the hand-authored openapi.yaml

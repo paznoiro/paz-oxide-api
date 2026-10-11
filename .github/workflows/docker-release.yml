@@ -63,7 +63,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/oxide-api
+          images: ghcr.io/${{ github.repository_owner }}/paz-oxide-api
           flavor: |
             latest=false
           tags: |
@@ -94,7 +94,7 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/oxide-api
+          subject-name: ghcr.io/${{ github.repository_owner }}/paz-oxide-api
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
@@ -117,9 +117,9 @@ jobs:
             Multi-arch (`linux/amd64`, `linux/arm64`), published by the `release-docker` workflow:
 
             ```sh
-            docker pull ghcr.io/${{ github.repository_owner }}/oxide-api:${{ needs.docker.outputs.version }}
-            docker run -p 8080:8080 -e OXIDE_API_API_KEY=<your-key> --read-only ghcr.io/${{ github.repository_owner }}/oxide-api:${{ needs.docker.outputs.version }}
+            docker pull ghcr.io/${{ github.repository_owner }}/paz-oxide-api:${{ needs.docker.outputs.version }}
+            docker run -p 8080:8080 -e OXIDE_API_API_KEY=<your-key> --read-only ghcr.io/${{ github.repository_owner }}/paz-oxide-api:${{ needs.docker.outputs.version }}
             ```
 
             Also tagged `:latest` (stable releases only).
-            Package page: ${{ github.server_url }}/${{ github.repository }}/pkgs/container/oxide-api
+            Package page: ${{ github.server_url }}/${{ github.repository }}/pkgs/container/paz-oxide-api
