@@ -20,8 +20,8 @@ image and pushes it to GHCR (workflow: `.github/workflows/docker-release.yml`).
 Release notes also carry the exact `docker pull` lines under "Container image (GHCR)".
 
 ```sh
-docker pull ghcr.io/paznoiro/paz-oxide-api:0.2.0
-docker run -p 8080:8080 -e OXIDE_API_API_KEY=$OXIDE_API_API_KEY --read-only ghcr.io/paznoiro/paz-oxide-api:0.2.0
+docker pull ghcr.io/paznoiro/paz-oxide-api:0.2.1
+docker run -p 8080:8080 -e OXIDE_API_API_KEY=$OXIDE_API_API_KEY --read-only ghcr.io/paznoiro/paz-oxide-api:0.2.1
 ```
 
 Stable releases are additionally tagged `:latest`. Browse all versions at
@@ -236,8 +236,8 @@ owner-password-only PDF opens normally.
 ```sh
 export OXIDE_API_API_KEY=$(openssl rand -hex 32)          # keep it: clients need it
 zd  deployments/production.docs.yaml --dry-run            # preview
-zbd deployments/production.docs.yaml --tag 0.2.0          # build linux/amd64, push to GHCR, deploy
-zd  deployments/production.docs.yaml --tag 0.2.0          # redeploy a tag that's already pushed
+zbd deployments/production.docs.yaml --tag 0.2.1          # build linux/amd64, push to GHCR, deploy
+zd  deployments/production.docs.yaml --tag 0.2.1          # redeploy a tag that's already pushed
 URL=https://oxide-api.zaporion.com make smoke             # end-to-end checks against the server
 ./scripts/local.sh                                       # local run of the server compose on localhost:8080
 ```

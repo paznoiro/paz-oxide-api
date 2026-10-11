@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Oxide API
-  version: 0.2.0
+  version: 0.2.1
   summary: Text and markdown extraction from PDF, Office, OpenDocument and image files, with OCR.
   description: |
     One HTTP API that extracts `text` and `markdown` from **PDF**, **Office** (DOCX, XLSX, PPTX,
@@ -401,7 +401,7 @@ components:
     X-Engine:
       description: |
         Engine and version: `pdf_oxide/0.3.78` (PDFs, and image OCR), `office_oxide/0.1.13`
-        (DOCX/XLSX/PPTX/DOC/XLS/PPT) or `oxide-api/0.2.0` (OpenDocument, image info).
+        (DOCX/XLSX/PPTX/DOC/XLS/PPT) or `oxide-api/0.2.1` (OpenDocument, image info).
       schema: { type: string }
     Server-Timing:
       description: '`queue`, `parse`, `extract` and (when OCR ran) `ocr` durations in ms.'
