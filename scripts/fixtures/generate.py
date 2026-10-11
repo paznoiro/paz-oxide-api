@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import zlib
 
 from PIL import Image, ImageDraw, ImageFont, features
 
@@ -354,6 +355,112 @@ def make_nested_pdf(depth=50_000):
         f.write(body)
 
 
+def write_objstm_pdf(name, packed, loose, rows, trailer, update=()):
+    """PDF 1.5+ writer for the misfiled-xref fixtures. `packed` become
+    objects 1..n inside an ObjStm, `loose` are (key, header, stream payload or
+    None) written as they are, `update` likewise but after the ObjStm, the way
+    an incremental update appends them; the ObjStm and the xref stream take
+    the next two numbers. `rows(at)` gets every object's byte offset and
+    returns the xref stream's (type, field 2, field 3) rows, broken as the
+    fixture needs."""
+    offs, data = [], b""
+    for o in packed:
+        offs.append(len(data))
+        data += o + b"\n"
+    head = " ".join(f"{n} {off}" for n, off in enumerate(offs, 1)).encode() + b"\n"
+    objstm = zlib.compress(head + data)
+
+    body = b"%PDF-1.7\n%\x81\x81\x81\x81\n"
+    at = {}
+
+    def obj(key, header, payload=None):
+        nonlocal body
+        at[key] = len(body)
+        body += header
+        if payload is not None:
+            body += b"\nstream\n" + payload + b"\nendstream"
+        body += b"\nendobj\n"
+
+    for key, header, payload in loose:
+        obj(key, header, payload)
+    stm = max(k for k, _, _ in [*loose, *update] if isinstance(k, int)) + 1
+    obj(stm, f"{stm} 0 obj\n<< /Type /ObjStm /N {len(packed)} /First {len(head)} /Filter /FlateDecode"
+             f" /Length {len(objstm)} >>".encode(), objstm)
+    for key, header, payload in update:
+        obj(key, header, payload)
+    at[stm + 1] = len(body)
+    table = rows(at)
+    xref = zlib.compress(b"".join(bytes([t]) + a.to_bytes(2, "big") + b.to_bytes(2, "big") for t, a, b in table))
+    obj(stm + 1, f"{stm + 1} 0 obj\n<< /Type /XRef /Size {stm + 2} {trailer} /W [1 2 2] /Index [0 {len(table)}]"
+                 f" /Filter /FlateDecode /Length {len(xref)} >>".encode(), xref)
+    body += f"startxref\n{at[stm + 1]}\n%%EOF\n".encode()
+    with open(out(name), "wb") as f:
+        f.write(body)
+
+
+def page_content(text):
+    content = f"BT /F1 24 Tf 72 700 Td ({text}) Tj ET\nq 20 0 0 20 72 640 cm /Im1 Do Q\n".encode()
+    return f"<< /Length {len(content)} >>".encode(), content
+
+
+def make_misfiled_xref_pdfs():
+    # One stray xref-stream row: the rewritten Catalog (`1 1 obj`) got a
+    # second entry instead of replacing the first, so every later row
+    # describes the object before it and the ObjStm's row (8) lands on an
+    # image XObject. Seen in the wild after pdf-lib stamped a form.
+    head, content = page_content("Misfiled xref recovered")
+    write_objstm_pdf(
+        "misfiled_xref.pdf",
+        packed=[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R"
+            b" /Resources << /Font << /F1 4 0 R >> /XObject << /Im1 7 0 R >> >> >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Producer (oxide-api fixtures) >>",
+        ],
+        loose=[
+            ("1.1", b"1 1 obj\n<< /Type /Catalog /Pages 2 0 R /PageMode /UseNone >>", None),
+            (6, b"6 0 obj\n" + head, content),
+            (7, b"7 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray"
+                b" /BitsPerComponent 8 /Length 1 >>", b"\x80"),
+        ],
+        rows=lambda at: [(0, 0, 65535), (2, 8, 0), (1, at["1.1"], 1)]  # the stray row
+        + [(2, 8, i) for i in range(1, 5)] + [(1, at[n], 0) for n in (6, 7, 8, 9)],
+        trailer="/Root 1 1 R /Info 5 0 R",
+    )
+
+    # Recovering a misfiled object must not resurrect superseded ones. Page 3
+    # was rewritten outside the ObjStm (its xref row is right); the Pages row
+    # points at another object's header, so finding Pages means sweeping the
+    # ObjStm, which still holds the old page 3.
+    old_head, old_content = page_content("Superseded page text")
+    new_head, new_content = page_content("Current page text")
+    page = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents %d 0 R"
+            b" /Resources << /Font << /F1 4 0 R >> /XObject << /Im1 7 0 R >> >> >>")
+    write_objstm_pdf(
+        "misfiled_xref_superseded.pdf",
+        packed=[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            page % 5,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        ],
+        loose=[
+            (5, b"5 0 obj\n" + old_head, old_content),
+            (7, b"7 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray"
+                b" /BitsPerComponent 8 /Length 1 >>", b"\x80"),
+        ],
+        update=[
+            (6, b"6 0 obj\n" + new_head, new_content),
+            ("3.new", b"3 0 obj\n" + page % 6, None),
+        ],
+        rows=lambda at: [(0, 0, 65535), (2, 8, 0), (1, at[6], 0), (1, at["3.new"], 0), (2, 8, 3)]
+        + [(1, at[n], 0) for n in (5, 6, 7, 8, 9)],
+        trailer="/Root 1 0 R",
+    )
+
+
 # --------------------------------------------------------------------------
 # Images (sent straight to OCR)
 # --------------------------------------------------------------------------
@@ -424,6 +531,7 @@ GROUPS = {
     "legacy": make_legacy_font_pdf,
     "encrypted": make_encrypted_pdfs,  # needs native.pdf
     "nested": make_nested_pdf,
+    "misfiled": make_misfiled_xref_pdfs,
     "images": make_images,
     "golden": make_golden,
 }

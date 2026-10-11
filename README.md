@@ -284,6 +284,11 @@ native-only binary (images then report `ocr.status: "unavailable"`).
 2. **`nesting-limit`**: the object parser recursed without bound on nested arrays and dictionaries. A
    crafted PDF overflowed any thread stack and aborted the process (`tests/fixtures/nested.pdf`).
    Nesting is now capped at 256.
+3. **`misfiled-xref`**: an xref entry whose offset holds a different object was used anyway. One stray
+   row in an xref stream (written by pdf-lib after stamping a form) shifts every later entry, so the
+   ObjStm lookup hit an image XObject and the whole PDF came back `corrupt-document`
+   (`tests/fixtures/misfiled_xref.pdf`). Such objects are now found by header scan or in the object
+   streams; when neither has them, the old outcome stands.
 
 Drop them once upstream ships fixes.
 

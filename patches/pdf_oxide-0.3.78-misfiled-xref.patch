@@ -1,0 +1,257 @@
+An xref entry that names the wrong object was trusted anyway. One stray row in
+an xref stream (seen after pdf-lib stamped a form and rewrote the Catalog)
+shifts every later entry onto its neighbour's offset, so an ObjStm lookup lands
+on an image XObject and the whole document fails with "expected /Type /ObjStm,
+got /Type /XObject". When an entry's header names another object, or its
+stream isn't an object stream holding the object, find the object where it
+really is (the whole-file header scan, then the object-stream sweep) before
+falling back to the old outcome.
+
+The sweep now runs for more files, so it no longer resurrects superseded
+revisions: it skips objects whose uncompressed xref entry checks out, prefers
+the stream the xref names (else the newest copy), and only treats an object as
+an ObjStm candidate when /Type /ObjStm is in its own dictionary.
+
+--- a/src/document.rs
++++ b/src/document.rs
+@@ -747,7 +747,18 @@
+         // ObjStm dict header is always uncompressed plaintext even when
+         // the stream body is Flate-encoded.
+         let window_end = (pos + DICT_PEEK_BYTES).min(content.len());
+-        let window = &content[pos..window_end];
++        let mut window = &content[pos..window_end];
++        // Only this object's own dictionary, up to its `stream` / `endobj`:
++        // a wider window also matches objects that merely precede an
++        // ObjStm, and the sweep's load would cache them (superseded
++        // revisions included).
++        if let Some(end) = [&b"stream"[..], b"endobj"]
++            .iter()
++            .filter_map(|kw| find_substring(window, kw))
++            .min()
++        {
++            window = &window[..end];
++        }
+         if contains_objstm_marker(window) {
+             out.push((obj_num, header_start as u64));
+         }
+@@ -780,6 +791,14 @@
+     false
+ }
+ 
++/// Whether `bytes` starts with the `N G obj` header of object `obj_num`.
++fn header_names(bytes: &[u8], obj_num: u32) -> bool {
++    let mut parts = bytes.split(u8::is_ascii_whitespace).filter(|p| !p.is_empty());
++    parts.next().and_then(|n| std::str::from_utf8(n).ok()?.parse::<u32>().ok()) == Some(obj_num)
++        && parts.next().is_some_and(|g| g.iter().all(u8::is_ascii_digit))
++        && parts.next().is_some_and(|kw| kw.starts_with(b"obj"))
++}
++
+ /// Append ink names declared by `Separation` and `DeviceN` colour spaces
+ /// in `cs_dict` to `out`. Reserved colorants `/All` and `/None` (§8.6.6.4)
+ /// are skipped. Caller is responsible for deduping across multiple calls.
+@@ -2370,6 +2389,12 @@
+     /// and cache everything inside (overwriting any stale `Object::Null`
+     /// entries from earlier free-entry short-circuits).
+     ///
++    /// Also used for misfiled xref entries (`recover_misfiled_object`), so
++    /// the xref is trusted where it checks out: an object packed in several
++    /// streams comes from the one the xref names (else the newest), and an
++    /// object whose uncompressed entry points at its own header is not
++    /// cached at all — its packed copy is a superseded revision.
++    ///
+     /// Runs at most once per document — guarded by `objstm_recovery_done`.
+     /// Cost is amortised across every recovered object.
+     fn recover_from_object_streams(&self) {
+@@ -2412,6 +2437,9 @@
+ 
+         let mut objstms_found = 0usize;
+         let mut recovered = 0usize;
++        // One copy per object: from the stream the xref names, else the last
++        // one in the file (the newest revision). `true` marks the former.
++        let mut chosen: HashMap<u32, (Object, bool)> = HashMap::new();
+         for (stream_obj_num, offset) in &candidates {
+             let stream_ref = ObjectRef::new(*stream_obj_num, 0);
+             let stream_obj = match self.load_uncompressed_object(stream_ref, *offset) {
+@@ -2444,21 +2472,44 @@
+                 },
+             };
+ 
+-            let mut cache = self.object_cache.lock_or_recover();
+             for (obj_num, object) in objects_map {
+-                let cache_ref = ObjectRef::new(obj_num, 0);
+-                // Only overwrite entries we'd otherwise have resolved to
+-                // Null (the free-entry short-circuit caches Null). Never
+-                // clobber a real object loaded through the normal path.
+-                match cache.get(&cache_ref) {
+-                    Some(Object::Null) | None => {
+-                        cache.insert(cache_ref, object);
+-                        recovered += 1;
+-                    },
+-                    _ => {},
++                let named = self.xref.get(obj_num).is_some_and(|e| {
++                    e.entry_type == crate::xref::XRefEntryType::Compressed
++                        && e.offset == u64::from(*stream_obj_num)
++                });
++                if !chosen.get(&obj_num).is_some_and(|(_, was_named)| *was_named) {
++                    chosen.insert(obj_num, (object, named));
+                 }
++            }
++        }
++
++        let mut cache = self.object_cache.lock_or_recover();
++        for (obj_num, (object, _)) in chosen {
++            // An uncompressed xref entry whose header names the object is
++            // right, so a packed copy of it is superseded: leave it be.
++            let entry_checks_out = self.xref.get(obj_num).is_some_and(|e| {
++                e.in_use
++                    && e.entry_type == crate::xref::XRefEntryType::Uncompressed
++                    && file_bytes
++                        .get(e.offset as usize..)
++                        .is_some_and(|rest| header_names(rest, obj_num))
++            });
++            if entry_checks_out {
++                continue;
+             }
++            let cache_ref = ObjectRef::new(obj_num, 0);
++            // Only overwrite entries we'd otherwise have resolved to
++            // Null (the free-entry short-circuit caches Null). Never
++            // clobber a real object loaded through the normal path.
++            match cache.get(&cache_ref) {
++                Some(Object::Null) | None => {
++                    cache.insert(cache_ref, object);
++                    recovered += 1;
++                },
++                _ => {},
++            }
+         }
++        drop(cache);
+ 
+         log::debug!(
+             "Object-stream recovery sweep: {} candidate positions, {} ObjStms, {} objects cached",
+@@ -3557,6 +3608,22 @@
+             offset: offset as usize,
+             reason: format!("Invalid generation number in header: {}", parts[1]),
+         })?;
++
++        // A header naming a different object means the xref entry is wrong
++        // (an xref stream with one stray row shifts every later entry onto
++        // its neighbour's offset). Load the object from where it really is;
++        // only when it can't be found, keep the old behaviour below.
++        if obj_num != obj_ref.id && !already_corrected {
++            log::warn!(
++                "Xref entry for object {} points at object {} (offset {}); recovering",
++                obj_ref.id,
++                obj_num,
++                offset
++            );
++            if let Some(obj) = self.recover_misfiled_object(obj_ref) {
++                return Ok(obj);
++            }
++        }
+ 
+         // Verify object reference matches (warn but don't fail on mismatch)
+         if obj_num != obj_ref.id || gen_num != obj_ref.gen {
+@@ -3794,10 +3861,10 @@
+         // (non-standard), the unencrypted parse will fail and we fall back to
+         // trying with decryption.
+         let handler_ref = self.encryption_handler.lock_or_recover();
+-        let objects_map = if handler_ref.is_some() {
++        let parsed = if handler_ref.is_some() {
+             // First try without decryption (spec-compliant path)
+             match parse_object_stream_with_decryption(&stream_obj, None, 0, 0) {
+-                Ok(map) => map,
++                Ok(map) => Ok(map),
+                 Err(_no_decrypt_err) => {
+                     // Fallback: try with decryption for non-standard producers
+                     let handler = handler_ref.as_ref().unwrap();
+@@ -3809,28 +3876,32 @@
+                         Some(&decrypt_fn),
+                         stream_obj_num,
+                         0,
+-                    )?
++                    )
+                 },
+             }
+         } else {
+-            parse_object_stream_with_decryption(&stream_obj, None, 0, 0)?
++            parse_object_stream_with_decryption(&stream_obj, None, 0, 0)
+         };
+         drop(handler_ref);
+ 
+-        // Extract the requested object
+-        let obj = match objects_map.get(&obj_ref.id) {
+-            Some(o) => o.clone(),
+-            None => {
+-                // PDF Spec §7.3.10: treat as null
++        // The xref may name a stream that isn't an object stream at all
++        // (e.g. an image): the entry is wrong, so look for the object itself.
++        let objects_map = match parsed {
++            Ok(map) => map,
++            Err(e) => {
+                 log::warn!(
+-                    "Object {} not found in object stream {}, treating as Null",
++                    "Stream {} holding object {} is unusable ({}); recovering",
++                    stream_obj_num,
+                     obj_ref.id,
+-                    stream_obj_num
++                    e
+                 );
+-                Object::Null
++                return self.recover_misfiled_object(obj_ref).ok_or(e);
+             },
+         };
+ 
++        // Extract the requested object
++        let obj = objects_map.get(&obj_ref.id).cloned();
++
+         // Cache all objects from the stream for future access
+         // IMPORTANT: Only cache objects whose xref entry points to THIS stream.
+         // In incremental updates, the same object number may exist in multiple streams,
+@@ -3858,9 +3929,46 @@
+             }
+         }
+ 
+-        Ok(obj)
++        match obj {
++            Some(obj) => Ok(obj),
++            // The xref files this object under a stream that doesn't hold it.
++            None => Ok(self.recover_misfiled_object(obj_ref).unwrap_or_else(|| {
++                // PDF Spec §7.3.10: treat as null
++                log::warn!(
++                    "Object {} not found in object stream {}, treating as Null",
++                    obj_ref.id,
++                    stream_obj_num
++                );
++                Object::Null
++            })),
++        }
+     }
+ 
++    /// Find an object whose xref entry is wrong: it points at another
++    /// object's header, or at a stream that isn't an object stream holding
++    /// it. Tries a standalone `N G obj` from the whole-file scan, then a copy
++    /// packed in any object stream. `None` when neither exists.
++    fn recover_misfiled_object(&self, obj_ref: ObjectRef) -> Option<Object> {
++        if let Ok(offset) = self.scan_for_object(obj_ref) {
++            match self.load_uncompressed_object_impl(obj_ref, offset, true) {
++                Ok(obj) => return Some(obj),
++                Err(e) => log::debug!(
++                    "Object {} at scanned offset {} failed to load: {}",
++                    obj_ref.id,
++                    offset,
++                    e
++                ),
++            }
++        }
++        self.recover_from_object_streams();
++        let packed = self
++            .object_cache
++            .lock_or_recover()
++            .get(&ObjectRef::new(obj_ref.id, 0))
++            .cloned();
++        packed.filter(|o| !matches!(o, Object::Null))
++    }
++
+     /// Find object header by searching backwards from a given offset.
+     ///
+     /// Some PDF generators create xref tables with incorrect offsets that point

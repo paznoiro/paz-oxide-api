@@ -510,6 +510,27 @@ async fn deeply_nested_pdf_does_not_crash() {
     }
 }
 
+#[tokio::test]
+async fn misfiled_xref_entries_are_recovered() {
+    // A stray xref-stream row shifts every later entry onto its neighbour's
+    // offset: the ObjStm's entry points at an image XObject.
+    let app = app();
+    let r = send(&app, raw_req("/v1/extract/text", fixture("misfiled_xref.pdf"))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["page_count"], 1);
+    assert!(j["text"].as_str().unwrap().contains("Misfiled xref recovered"), "{}", j["text"]);
+    let r = send(&app, raw_req("/v1/info", fixture("misfiled_xref.pdf"))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+
+    // Recovering the misfiled Pages object sweeps the ObjStm, which still
+    // holds a superseded copy of the page; the page's own entry is right.
+    let r = send(&app, raw_req("/v1/extract/text", fixture("misfiled_xref_superseded.pdf"))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let text = r.json()["text"].as_str().unwrap().to_owned();
+    assert!(text.contains("Current page text") && !text.contains("Superseded"), "{text}");
+}
+
 // --------------------------------------------------------------------------
 // Auth, limits, admission, params
 // --------------------------------------------------------------------------
