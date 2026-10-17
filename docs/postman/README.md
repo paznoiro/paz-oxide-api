@@ -19,7 +19,7 @@ use `noauth`.
 
 | Folder | Requests |
 |---|---|
-| `extract` | every endpoint (`text`, `markdown`, `info`) in each input style: multipart, JSON base64, raw body with `Accept: text/plain` / `text/markdown`. Any supported file works: the type is detected from the content |
+| `extract` | every endpoint (`text`, `markdown`, `fields`, `info`) in each input style: multipart, JSON base64, raw body with `Accept: text/plain` / `text/markdown`. Any supported file works: the type is detected from the content |
 | `images (OCR)` | an image to text, a sideways phone photo (EXIF rotation), page 2 of a multi-page TIFF, raw markdown from an Arabic WebP, image info |
 | `opendocument` | ODT / ODS / ODP to markdown, spreadsheet info |
 | `ops` | health, readiness, version, metrics, OpenAPI |

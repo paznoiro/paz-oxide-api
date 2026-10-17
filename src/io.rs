@@ -1,6 +1,9 @@
 //! Request input: multipart (`file=<binary>`), JSON (`{"file_base64": …}`),
 //! or a raw body. Params are top-level multipart parts, JSON keys, or query
 //! params — never nested. Body params override query params.
+//!
+//! An endpoint may take a few named values whole instead ([`Shape`]): any JSON
+//! value, or a multipart part or query param of any length, kept as a string.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -19,15 +22,34 @@ use crate::error::ApiError;
 pub type Params = BTreeMap<String, String>;
 
 pub struct Input {
+    /// Empty only when the endpoint's [`Shape`] makes the document optional.
     pub bytes: Bytes,
     pub filename: Option<String>,
     pub params: Params,
+    /// The values named in [`Shape::whole`] that the request carried.
+    pub whole: BTreeMap<String, Value>,
+}
+
+/// What an endpoint takes beyond a document and scalar params.
+#[derive(Clone, Copy, Default)]
+pub struct Shape {
+    /// Keys taken whole: in a JSON body any value, nested or not; as a
+    /// multipart part or query param, the string as sent, of any length
+    /// (a query param still within the usual limit). They never reach `params`.
+    pub whole: &'static [&'static str],
+    /// The request may carry no document at all.
+    pub document_optional: bool,
 }
 
 const MAX_PARAM_LEN: usize = 4096;
 
 /// Reads the whole input. The caller wraps this in the body timeout.
 pub async fn read_input(req: Request, max_body: usize) -> Result<Input, ApiError> {
+    read_input_shaped(req, max_body, Shape::default()).await
+}
+
+/// [`read_input`] for an endpoint that takes more than scalar params.
+pub async fn read_input_shaped(req: Request, max_body: usize, shape: Shape) -> Result<Input, ApiError> {
     let content_length = content_length(req.headers());
     if let Some(len) = content_length
         && len > max_body
@@ -44,16 +66,23 @@ pub async fn read_input(req: Request, max_body: usize) -> Result<Input, ApiError
         .to_ascii_lowercase();
     let mime = ctype.split(';').next().unwrap_or("").trim().to_string();
 
+    let mut whole = BTreeMap::new();
     let (bytes, filename) = match mime.as_str() {
-        "multipart/form-data" => read_multipart(req, max_body, content_length, &mut params).await?,
-        "application/json" => read_json(req, max_body, content_length, &mut params).await?,
+        "multipart/form-data" => read_multipart(req, max_body, content_length, &mut params, &mut whole, shape).await?,
+        "application/json" => read_json(req, max_body, content_length, &mut params, &mut whole, shape).await?,
         _ => {
             let disposition = filename_from_disposition(req.headers());
             let bytes = read_body(req.into_body(), max_body, content_length).await?;
             (bytes, disposition)
         }
     };
-    if bytes.is_empty() {
+    // A whole value from the query string counts unless the body sent one.
+    for key in shape.whole {
+        if let Some(v) = params.remove(*key) {
+            whole.entry((*key).to_string()).or_insert(Value::String(v));
+        }
+    }
+    if bytes.is_empty() && !shape.document_optional {
         return Err(ApiError::bad_request(
             "no document received: send multipart `file`, JSON `file_base64`, or the raw bytes as the body",
         ));
@@ -62,7 +91,7 @@ pub async fn read_input(req: Request, max_body: usize) -> Result<Input, ApiError
         return Err(ApiError::too_large(max_body));
     }
     let filename = filename.or_else(|| params.get("filename").cloned());
-    Ok(Input { bytes, filename, params })
+    Ok(Input { bytes, filename, params, whole })
 }
 
 fn content_length(headers: &HeaderMap) -> Option<usize> {
@@ -167,6 +196,8 @@ async fn read_multipart(
     max_body: usize,
     size_hint: Option<usize>,
     params: &mut Params,
+    whole: &mut BTreeMap<String, Value>,
+    shape: Shape,
 ) -> Result<(Bytes, Option<String>), ApiError> {
     let mut mp = Multipart::from_request(req, &())
         .await
@@ -192,12 +223,19 @@ async fn read_multipart(
                 buf.extend_from_slice(&chunk);
             }
             file = Some((buf.freeze(), fname));
+        } else if shape.whole.contains(&name.as_str()) {
+            let text = field.text().await.map_err(|e| multipart_error(e.status(), max_body))?;
+            whole.insert(name, Value::String(text));
         } else if !name.is_empty() {
             let text = field.text().await.map_err(|e| multipart_error(e.status(), max_body))?;
             insert_param(params, name, text.trim().to_string())?;
         }
     }
-    file.ok_or_else(|| ApiError::bad_request("multipart body has no `file` part"))
+    match file {
+        Some(f) => Ok(f),
+        None if shape.document_optional => Ok((Bytes::new(), None)),
+        None => Err(ApiError::bad_request("multipart body has no `file` part")),
+    }
 }
 
 fn multipart_error(status: StatusCode, max_body: usize) -> ApiError {
@@ -212,6 +250,8 @@ async fn read_json(
     max_body: usize,
     size_hint: Option<usize>,
     params: &mut Params,
+    whole: &mut BTreeMap<String, Value>,
+    shape: Shape,
 ) -> Result<(Bytes, Option<String>), ApiError> {
     let raw = read_body(req.into_body(), max_body, size_hint).await?;
     let value: Value = serde_json::from_slice(&raw).map_err(|_| ApiError::bad_request("request body is not valid JSON"))?;
@@ -228,6 +268,10 @@ async fn read_json(
             }
             continue;
         }
+        if shape.whole.contains(&k.as_str()) {
+            whole.insert(k, v);
+            continue;
+        }
         let s = match v {
             Value::String(s) => s,
             Value::Bool(b) => b.to_string(),
@@ -239,7 +283,11 @@ async fn read_json(
         };
         insert_param(params, k, s)?;
     }
-    let b64 = b64.ok_or_else(|| ApiError::bad_request("JSON body has no `file_base64`"))?;
+    let b64 = match b64 {
+        Some(b) => b,
+        None if shape.document_optional => return Ok((Bytes::new(), None)),
+        None => return Err(ApiError::bad_request("JSON body has no `file_base64`")),
+    };
     let bytes = decode_base64(&b64)?;
     Ok((Bytes::from(bytes), None))
 }

@@ -646,7 +646,7 @@ async fn ops_endpoints() {
 #[tokio::test]
 async fn openapi_documents_every_route() {
     let spec: Value = serde_json::from_str(oxide_api::OPENAPI_JSON).unwrap();
-    for path in ["/v1/extract/text", "/v1/extract/markdown", "/v1/info", "/healthz", "/readyz", "/version", "/metrics"] {
+    for path in ["/v1/extract/text", "/v1/extract/markdown", "/v1/extract/fields", "/v1/info", "/healthz", "/readyz", "/version", "/metrics"] {
         assert!(spec["paths"].get(path).is_some(), "{path} missing from openapi.json");
     }
     // The YAML and JSON contracts are the same document.
@@ -681,6 +681,18 @@ async fn openapi_documents_every_route() {
     for k in r.json().as_object().unwrap().keys() {
         assert!(props.get(k).is_some(), "ImageInfo schema lacks `{k}`");
     }
+    let specs = json!([{"name": "first", "patterns": [r"page-(\w+)-alpha"]}]);
+    let r = send(&app, json_req("/v1/extract/fields", &fixture("native.pdf"), json!({"fields": specs, "include_text": true, "foo": 1}))).await;
+    let props = &spec["components"]["schemas"]["FieldsExtraction"]["properties"];
+    for k in r.json().as_object().unwrap().keys() {
+        assert!(props.get(k).is_some(), "FieldsExtraction schema lacks `{k}`");
+    }
+    // Every key a field spec may carry is documented, and nothing more.
+    let mut documented: Vec<&str> = spec["components"]["schemas"]["FieldSpec"]["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    let mut known = oxide_api::fields::FIELD_KEYS.to_vec();
+    documented.sort_unstable();
+    known.sort_unstable();
+    assert_eq!(documented, known, "FieldSpec properties drift from fields::FIELD_KEYS");
     // Every accepted `format` value is in the contract.
     let formats = &spec["components"]["parameters"]["format"]["schema"]["enum"];
     for f in oxide_api::detect::ACCEPTED_FORMATS.split(", ") {
@@ -811,4 +823,260 @@ async fn deadline_returns_partial_pdf_results() {
     let r = send(&app, raw_req("/v1/extract/text", many_page_pdf(2001))).await;
     assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(r.json()["type"], "/problems/too-many-pages");
+}
+
+// --------------------------------------------------------------------------
+// /v1/extract/fields
+// --------------------------------------------------------------------------
+
+fn fields_json(uri: &str, body: Value) -> Request<Body> {
+    authed("POST", uri).header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn fields_from_supplied_text() {
+    let app = app();
+    let text = "Tax Invoice\nInvoice No:   INV-2026/0042\nPO Number\n  PO-77/A\nTotal amount due: 1,250.00\n\n\n\nRef: R-1 Ref: R-2";
+    let r = send(
+        &app,
+        fields_json(
+            "/v1/extract/fields?pages=1",
+            json!({
+                "text": text,
+                "include_text": true,
+                "clean": true,
+                "fields": [
+                    {"name": "invoice_number", "patterns": [r"(?i)invoice\s*no[:.]?\s*([A-Z0-9 _./-]+)"], "required": true},
+                    {"name": "po_number", "patterns": [r"PO Number\s+([^\n]+)"]},
+                    {"name": "total", "patterns": [r"Total amount due:\s*([\d,]+\.\d{2})"], "max_length": 12},
+                    {"name": "refs", "patterns": [r"Ref: (R-\d)"], "multiple": true},
+                    {"name": "iban", "patterns": [r"IBAN:\s*(\S+)"], "required": true},
+                ],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["kind"], "text");
+    assert!(j.get("format").is_none() && j.get("page_count").is_none());
+    assert_eq!(
+        j["fields"],
+        json!({"invoice_number": "INV-2026/0042", "po_number": "PO-77/A", "total": "1,250.00", "refs": ["R-1", "R-2"], "iban": null})
+    );
+    // Request order, not alphabetical (read off the wire: a parsed Value sorts its keys).
+    let body = r.text();
+    let at = |k: &str| body.find(&format!("\"{k}\":")).unwrap();
+    assert!(at("invoice_number") < at("po_number") && at("po_number") < at("total") && at("total") < at("refs") && at("refs") < at("iban"));
+    assert_eq!(j["missing_required"], json!(["iban"]));
+    // `clean` ran before the fields: the blank lines are collapsed in the text they saw.
+    assert!(!j["text"].as_str().unwrap().contains("\n\n\n"));
+    assert_eq!(j["char_count"].as_u64().unwrap() as usize, j["text"].as_str().unwrap().chars().count());
+    // No document, so the document params don't apply.
+    assert_eq!(j["ignored_params"], json!(["pages"]));
+    assert_eq!(r.header("cache-control"), Some("no-store"));
+
+    // Empty text is text: every field is null, a required one is missing, and the
+    // specs are still checked (callers use this to validate fields without a document).
+    let r = send(
+        &app,
+        fields_json(
+            "/v1/extract/fields",
+            json!({"text": "", "include_text": true, "fields": [
+                {"name": "a", "patterns": [r"(\S*)"]},
+                {"name": "b", "patterns": ["x"], "required": true},
+            ]}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["kind"], "text");
+    assert_eq!(j["fields"], json!({"a": null, "b": null}));
+    assert_eq!(j["missing_required"], json!(["b"]));
+    assert_eq!(j["char_count"], 0);
+    assert_eq!(j["text"], "");
+    let r = send(&app, fields_json("/v1/extract/fields", json!({"text": "", "fields": [{"name": "a", "patterns": ["(?<=x)y"]}]}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.json()["parameter"], "fields[0].patterns[0]");
+
+    // Without include_text the text stays home.
+    let r = send(&app, fields_json("/v1/extract/fields", json!({"text": text, "fields": [{"name": "a", "patterns": ["Tax"]}]}))).await;
+    assert!(r.json().get("text").is_none());
+}
+
+#[tokio::test]
+async fn typed_fields_check_and_rewrite_their_values() {
+    let app = app();
+    let text = "Due Date: on receipt\nInvoice Date: 14 Oct 2026\nGSTIN: 27AAPFU0939F1ZW\nGSTIN: 27AAPFU0939F1ZV\nTotal: ₹ 1,25,000.50";
+    let r = send(
+        &app,
+        fields_json(
+            "/v1/extract/fields",
+            json!({"text": text, "fields": [
+                {"name": "invoice_date", "patterns": [r"Date:\s*([^\n]+)"], "type": "date"},
+                {"name": "gstin", "patterns": [r"GSTIN:\s*(\S+)"], "type": "gstin"},
+                {"name": "total", "patterns": [r"Total:\s*([^\n]+)"], "type": "amount", "format": "point"},
+                {"name": "pan", "patterns": [r"PAN:\s*(\S+)"], "type": "pan", "required": true},
+                {"name": "note", "patterns": [r"(Tax)"]},
+            ]}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    // "on receipt" is no date and the first GSTIN fails its check: both move on to the next match.
+    assert_eq!(
+        j["fields"],
+        json!({"invoice_date": "2026-10-14", "gstin": "27AAPFU0939F1ZV", "total": "125000.50", "pan": null, "note": null})
+    );
+    assert_eq!(
+        j["matched"],
+        json!({"invoice_date": "14 Oct 2026", "gstin": "27AAPFU0939F1ZV", "total": "₹ 1,25,000.50", "pan": null, "note": null})
+    );
+    assert_eq!(j["missing_required"], json!(["pan"]));
+
+    // A type or format that does not exist is refused before anything is read.
+    for (spec, param) in [
+        (json!({"name": "t", "patterns": ["x"], "type": "money"}), "fields[0].type"),
+        (json!({"name": "t", "patterns": ["x"], "type": "date", "format": "comma"}), "fields[0].format"),
+        (json!({"name": "t", "patterns": ["x"], "format": "dmy"}), "fields[0].format"),
+    ] {
+        let r = send(&app, fields_json("/v1/extract/fields", json!({"text": "", "fields": [spec]}))).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.text());
+        assert_eq!(r.json()["parameter"], param);
+    }
+}
+
+#[tokio::test]
+async fn po_date_numeric_format_is_checked_after_the_regex_matches() {
+    let app = app();
+    let text = "ver nem PURCHASE ORDER\nPurchase Order No.: 13693\n1400 N. Providence Rd., Suite 302\nMedia, PA 19063 Date Issued 9/29/22\nPhone: 484-234-6030";
+    // The third pattern from a real PO field: the regex captures the date;
+    // DMY rejects its month, while MDY reads the same capture successfully.
+    let pattern = concat!(
+        r"(?i)(?:date\s*issued|purchase\s+order\s+date|p\.?\s*o\.?\s*date|order\s+date)[ \t]*[:.#-]*[ \t]*",
+        r"(\d{1,4}[./-]\d{1,2}[./-]\d{1,4}|\d{1,2}(?:st|nd|rd|th)?[ \t./-]+[A-Za-z]{3,9}\.?,?[ \t./-]+\d{2,4}|[A-Za-z]{3,9}\.?[ \t]+\d{1,2}(?:st|nd|rd|th)?,?[ \t]+\d{2,4})",
+    );
+    let r = send(
+        &app,
+        fields_json(
+            "/v1/extract/fields",
+            json!({"text": text, "fields": [
+                {"name": "printed", "patterns": [pattern]},
+                {"name": "day_first", "patterns": [pattern], "type": "date", "format": "dmy", "required": true},
+                {"name": "po_date", "patterns": [pattern], "type": "date", "format": "mdy", "required": true},
+            ]}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["fields"], json!({"printed": "9/29/22", "day_first": null, "po_date": "2022-09-29"}));
+    assert_eq!(j["matched"], json!({"printed": "9/29/22", "day_first": null, "po_date": "9/29/22"}));
+    assert_eq!(j["missing_required"], json!(["day_first"]));
+}
+
+#[tokio::test]
+async fn fields_from_a_document_in_every_encoding() {
+    let app = app();
+    let pdf = fixture("native.pdf");
+    let specs = json!([
+        {"name": "first", "patterns": [r"page-(\w+)-alpha"]},
+        {"name": "pages", "patterns": [r"page-(\w+)-(?:alpha|beta|gamma)"], "multiple": true},
+    ]);
+    let reqs = [
+        ("multipart", multipart_req("/v1/extract/fields", &pdf, Some("native.pdf"), &[("fields", &specs.to_string())])),
+        ("json", json_req("/v1/extract/fields", &pdf, json!({"fields": specs}))),
+        ("raw", raw_req(&format!("/v1/extract/fields?fields={}", urlencode(&specs.to_string())), pdf.clone())),
+    ];
+    for (enc, req) in reqs {
+        let r = send(&app, req).await;
+        assert_eq!(r.status, StatusCode::OK, "{enc}: {}", r.text());
+        let j = r.json();
+        assert_eq!(j["kind"], "pdf", "{enc}");
+        assert_eq!(j["format"], "pdf");
+        assert_eq!(j["format_source"], "sniff");
+        assert_eq!(j["page_count"], 3);
+        assert_eq!(j["ocr"]["status"], "native");
+        assert_eq!(j["fields"], json!({"first": "one", "pages": ["one", "two", "three"]}), "{enc}");
+        assert_eq!(j["missing_required"], json!([]));
+        assert!(j.get("text").is_none());
+        assert!(r.header("x-engine").unwrap().starts_with("pdf_oxide/"));
+    }
+
+    // Page selection narrows the text the fields see.
+    let r = send(&app, json_req("/v1/extract/fields", &pdf, json!({"fields": specs, "pages": "2", "include_text": true}))).await;
+    let j = r.json();
+    assert_eq!(j["fields"], json!({"first": null, "pages": ["two"]}));
+    assert_eq!(j["pages_extracted"], json!([2]));
+    assert!(j["text"].as_str().unwrap().contains("page-two-beta"));
+
+    // Office: no page details, and the paged params are listed as ignored.
+    let r = send(&app, json_req("/v1/extract/fields", &fixture("sample.docx"), json!({"ocr": "off", "fields": [{"name": "m", "patterns": [r"(docx)-alpha"]}]}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["kind"], "office");
+    assert_eq!(j["fields"], json!({"m": "docx"}));
+    assert!(j.get("page_count").is_none());
+    assert_eq!(j["ignored_params"], json!(["ocr"]));
+
+    // Asking for raw text changes nothing: the values only exist as JSON.
+    let mut req = json_req("/v1/extract/fields", &pdf, json!({"fields": specs}));
+    req.headers_mut().insert(header::ACCEPT, "text/plain".parse().unwrap());
+    let r = send(&app, req).await;
+    assert!(r.header("content-type").unwrap().starts_with("application/json"));
+    assert_eq!(r.json()["fields"]["first"], "one");
+}
+
+#[tokio::test]
+async fn fields_errors_are_400_before_any_reading() {
+    let app = app();
+    let pdf = fixture("native.pdf");
+    // A bad pattern names its place in the request and the engine's reason.
+    let r = send(&app, json_req("/v1/extract/fields", &pdf, json!({"fields": [{"name": "t", "patterns": ["ok", r"(?<=Total)\d+"]}]}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let j = r.json();
+    assert_eq!(j["type"], "/problems/invalid-parameter");
+    assert_eq!(j["parameter"], "fields[0].patterns[1]");
+    assert!(j["detail"].as_str().unwrap().contains("look-around"), "{j}");
+    assert!(j["accepted"].is_string());
+    // ... and so does a capture group the pattern lacks.
+    let r = send(&app, json_req("/v1/extract/fields", &pdf, json!({"fields": [{"name": "t", "patterns": ["(a)"], "capture_group": 3}]}))).await;
+    assert_eq!(r.json()["parameter"], "fields[0].capture_group");
+    // A bad spec is refused even when the document itself is unreadable: specs come first.
+    let r = send(&app, json_req("/v1/extract/fields", b"%PDF-1.7 garbage", json!({"fields": [{"name": "t", "patterns": ["("]}]}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+
+    for (body, why) in [
+        (json!({"text": "x"}), "no fields"),
+        (json!({"fields": [{"name": "t", "patterns": ["x"]}]}), "nothing to read"),
+        (json!({"text": null, "fields": [{"name": "t", "patterns": ["x"]}]}), "null text is no text"),
+        (json!({"text": 42, "fields": [{"name": "t", "patterns": ["x"]}]}), "text not a string"),
+        (json!({"text": "x", "fields": [{"name": "t", "patterns": ["x"]}], "include_text": "maybe"}), "bad include_text"),
+        (json!({"text": "x", "fields": {"name": "t"}}), "fields not an array"),
+    ] {
+        let r = send(&app, fields_json("/v1/extract/fields", body)).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{why}: {}", r.text());
+    }
+    // Nothing to read names what was missing.
+    let r = send(&app, fields_json("/v1/extract/fields", json!({"fields": [{"name": "t", "patterns": ["x"]}]}))).await;
+    assert_eq!(r.json()["parameter"], "text");
+    // Both a document and text.
+    let r = send(&app, json_req("/v1/extract/fields", &pdf, json!({"text": "x", "fields": [{"name": "t", "patterns": ["x"]}]}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.json()["parameter"], "text");
+    // A raw body has nowhere to carry the specs but the query string.
+    let r = send(&app, raw_req("/v1/extract/fields", pdf)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.json()["parameter"], "fields");
+    // Authenticated like every other /v1 route.
+    let req = Request::post("/v1/extract/fields").header(header::CONTENT_TYPE, "application/json").body(Body::from("{}")).unwrap();
+    assert_eq!(send(&app, req).await.status, StatusCode::UNAUTHORIZED);
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
 }

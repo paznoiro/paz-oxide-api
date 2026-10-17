@@ -406,3 +406,40 @@ fn eval_strategies() {
         }
     }
 }
+
+/// Fields from a scanned PDF. That the page is OCR'd once for all four fields
+/// is by construction (`read_document` runs once per request, then every field
+/// runs over its text), not counted here: the OCR metrics are process-wide, and
+/// these tests run in parallel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fields_read_from_a_scanned_pdf() {
+    let (app, _) = app_with(&[]).await;
+    let fields = json!([
+        {"name": "invoice_number", "patterns": [r"(?i)invoice\s+(\d+)"], "required": true},
+        {"name": "total", "patterns": [r"(?i)total amount due:?\s*([\d,]+\.\d{2})"]},
+        {"name": "terms", "patterns": [r"(?i)payment terms:?\s*([^\n]+)"]},
+        {"name": "iban", "patterns": [r"IBAN:\s*(\S+)"], "required": true},
+    ]);
+    let body = json!({
+        "file_base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, fixture("scan_en.pdf")),
+        "fields": fields,
+        "include_text": true,
+    });
+    let req = Request::post("/v1/extract/fields")
+        .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    eprintln!("--- fields: {}\n{}", j["fields"], text(&j));
+    assert_eq!(j["kind"], "pdf");
+    assert_eq!(j["ocr"]["status"], "ocr");
+    assert_eq!(j["ocr"]["pages"], json!([1]));
+    assert_eq!(j["fields"]["invoice_number"], "4471");
+    assert_eq!(j["fields"]["total"], "1,250.00");
+    assert!(j["fields"]["terms"].as_str().unwrap().to_lowercase().contains("thirty"), "{}", j["fields"]);
+    assert_eq!(j["fields"]["iban"], Value::Null);
+    assert_eq!(j["missing_required"], json!(["iban"]));
+}

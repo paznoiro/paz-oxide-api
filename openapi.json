@@ -4,7 +4,7 @@
     "title": "Oxide API",
     "version": "0.2.1",
     "summary": "Text and markdown extraction from PDF, Office, OpenDocument and image files, with OCR.",
-    "description": "One HTTP API that extracts `text` and `markdown` from **PDF**, **Office** (DOCX, XLSX, PPTX,\nDOC, XLS, PPT), **OpenDocument** (ODT, ODS, ODP) and **image** files (PNG, JPEG, TIFF, WebP,\nGIF, BMP, JPEG 2000, PNM, TGA). The file type is detected from the content, so one route\nserves every format.\n\nPDF pages are classified one by one: pages with a usable text layer are extracted natively,\nand scanned or legacy-font pages go through OCR (English, Hindi, Arabic) in the same request.\nImages go straight to OCR, one page per TIFF page; EXIF orientation is honoured. HEIC, AVIF\nand JPEG XL are recognized but not supported.\n\n**Input.** Send the document as multipart (`file=<binary>`), as JSON\n(`{\"file_base64\": \"...\"}`), or as the raw request body. Parameters are top-level multipart\nparts, JSON keys, or query parameters; body parameters override query parameters. Parameters\nthat don't apply to the detected document kind are ignored and listed in `ignored_params`.\n\n**Output.** JSON by default. `Accept: text/plain` (text endpoint) or `Accept: text/markdown`\n(markdown endpoint) returns the raw text, with metadata in `X-Oxide-*` headers.\n\n**Limits.** 32 MiB request body (for JSON this counts the base64 text). 8 requests are\nprocessed at once per container; others wait up to 1 s for a slot, then get `429`.\nNative extraction has a 30 s deadline, requests that OCR any page 120 s, both measured from\nadmission. A PDF or image that runs out of time returns the pages done so far with\n`incomplete: true`. Images are limited to 64 megapixels per page.\n\nErrors use RFC 9457 `application/problem+json`.\n",
+    "description": "One HTTP API that extracts `text` and `markdown` from **PDF**, **Office** (DOCX, XLSX, PPTX,\nDOC, XLS, PPT), **OpenDocument** (ODT, ODS, ODP) and **image** files (PNG, JPEG, TIFF, WebP,\nGIF, BMP, JPEG 2000, PNM, TGA). The file type is detected from the content, so one route\nserves every format.\n\nPDF pages are classified one by one: pages with a usable text layer are extracted natively,\nand scanned or legacy-font pages go through OCR (English, Hindi, Arabic) in the same request.\nImages go straight to OCR, one page per TIFF page; EXIF orientation is honoured. HEIC, AVIF\nand JPEG XL are recognized but not supported.\n\n**Input.** Send the document as multipart (`file=<binary>`), as JSON\n(`{\"file_base64\": \"...\"}`), or as the raw request body. Parameters are top-level multipart\nparts, JSON keys, or query parameters; body parameters override query parameters. Parameters\nthat don't apply to the detected document kind are ignored and listed in `ignored_params`.\n\n**Output.** JSON by default. `Accept: text/plain` (text endpoint) or `Accept: text/markdown`\n(markdown endpoint) returns the raw text, with metadata in `X-Oxide-*` headers.\n\n**Fields.** `/v1/extract/fields` reads the document exactly as the text endpoint does, then\nruns a list of named regular-expression fields over that one text and returns each value (or\n`null`). Its `fields` (and `text`) are taken whole, the one exception to \"never nested\".\n\n**Limits.** 32 MiB request body (for JSON this counts the base64 text). 8 requests are\nprocessed at once per container; others wait up to 1 s for a slot, then get `429`.\nNative extraction has a 30 s deadline, requests that OCR any page 120 s, both measured from\nadmission. A PDF or image that runs out of time returns the pages done so far with\n`incomplete: true`. Images are limited to 64 megapixels per page.\n\nErrors use RFC 9457 `application/problem+json`.\n",
     "license": {
       "name": "MIT OR Apache-2.0"
     }
@@ -202,6 +202,122 @@
                   "type": "string"
                 },
                 "description": "Raw markdown; metadata in `X-Oxide-*` headers."
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/UploadTimeout"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/Busy"
+          },
+          "503": {
+            "$ref": "#/components/responses/Draining"
+          }
+        }
+      }
+    },
+    "/v1/extract/fields": {
+      "post": {
+        "tags": [
+          "extract"
+        ],
+        "operationId": "extractFields",
+        "summary": "Extract named fields",
+        "description": "Reads the document to its final text exactly as `/v1/extract/text` does (native text, OCR\nwhere pages need it, Arabic presentation forms normalized, `clean` when asked), then runs\nevery field in `fields` over that one text: no field causes OCR of its own. Send `text`\ninstead of a document to run the fields over text you already have (from an earlier\nextraction, say) without reading anything again.\n\nEach field's patterns are tried in order; the first **valid** match wins. A match is valid\nwhen its capture group took part, is not blank, reads as the field's `type`, and fits\n`max_length`; an invalid match is skipped, never cut down. With `multiple`, every valid\nmatch of every pattern is kept in that order, each distinct value once (at most 1000).\nValues are the text as read, trimmed, or for a typed field in its type's form (a date\n`YYYY-MM-DD`, an amount a plain decimal): nothing is corrected. `matched` holds what each\nvalue was read from, as printed, for marking it in the text.\n\nEvery requested field is in the response: its value, an array (`multiple`), or `null` when\nnothing matched — never left out, unlike the optional keys of the other responses.\nRequired fields that matched nothing are also listed in `missing_required`; the request\nstill succeeds.\n\nPatterns are Rust `regex` syntax, matched in time linear in the text: inline flags such as\n`(?i)` (case), `(?m)` (`^`/`$` per line) and `(?s)` (`.` crosses lines) work; look-around\nand backreferences do not and are refused with the engine's reason. `\\d`, `\\w` and\n`(?i)` are Unicode-aware, so `\\d` also matches Arabic-Indic and Devanagari digits. A\nvalue on the line after its label is reached with `\\s+` (`Label\\s+([^\\n]+)`).\n\nSpecs are checked before the document is read, so a bad pattern costs a `400` and no OCR.\nA request holds at most 50 fields and 100 patterns of at most 1000 characters each.\nCounted repetitions of broad classes compile large (`\\w{1,200}` is ~10 MiB, the most one\npattern may take; `[A-Za-z0-9]{1,200}` a fraction of that); the larger patterns of one\nrequest share a 40 MiB budget.\n\nMatching has a deadline of its own, the 30 s native deadline started afresh once the text\nis read, because OCR may have used the request's. So a request that OCRs can run past the\n120 s OCR deadline by that much; matching is linear in the text and normally takes\nmilliseconds.\n\nAlways JSON: `Accept` is not negotiated.\n",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/format"
+          },
+          {
+            "$ref": "#/components/parameters/pages"
+          },
+          {
+            "$ref": "#/components/parameters/ocr"
+          },
+          {
+            "$ref": "#/components/parameters/lang"
+          },
+          {
+            "$ref": "#/components/parameters/clean"
+          },
+          {
+            "$ref": "#/components/parameters/include_text"
+          },
+          {
+            "$ref": "#/components/parameters/filename"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/FieldsInput"
+        },
+        "responses": {
+          "200": {
+            "description": "The fields' values",
+            "headers": {
+              "X-Engine": {
+                "$ref": "#/components/headers/X-Engine"
+              },
+              "Server-Timing": {
+                "$ref": "#/components/headers/Server-Timing"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FieldsExtraction"
+                },
+                "example": {
+                  "kind": "pdf",
+                  "format": "pdf",
+                  "format_source": "sniff",
+                  "fields": {
+                    "invoice_number": "4471",
+                    "total": "1250.00",
+                    "invoice_date": "2026-10-14"
+                  },
+                  "matched": {
+                    "invoice_number": "4471",
+                    "total": "1,250.00",
+                    "invoice_date": "14 Oct 2026"
+                  },
+                  "missing_required": [],
+                  "char_count": 104,
+                  "truncated": false,
+                  "page_count": 1,
+                  "pages_extracted": [
+                    1
+                  ],
+                  "incomplete": false,
+                  "ocr": {
+                    "status": "ocr",
+                    "lang": "en",
+                    "lang_source": "probe",
+                    "pages": [
+                      1
+                    ],
+                    "pages_needing_ocr": [],
+                    "failed_pages": [],
+                    "reasons": [
+                      {
+                        "page": 1,
+                        "reason": "scanned"
+                      }
+                    ]
+                  }
+                }
               }
             }
           },
@@ -578,6 +694,16 @@
           "default": false
         }
       },
+      "include_text": {
+        "name": "include_text",
+        "in": "query",
+        "required": false,
+        "description": "`/v1/extract/fields` only. Also return the text the fields ran over, so a caller that\nindexes the text and wants fields gets both from one read of the document.\n",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
       "filename": {
         "name": "filename",
         "in": "query",
@@ -669,6 +795,135 @@
               "format": "binary"
             },
             "description": "Any other content type is treated as the raw document."
+          }
+        }
+      },
+      "FieldsInput": {
+        "required": true,
+        "description": "A document, as for the other endpoints, or `text` — not both — plus `fields`. In a JSON\nbody `fields` is the array itself; as a multipart part or query parameter it is that array\nas a JSON string. A raw body can carry it only in the query string (4096 characters), so\nsend JSON or multipart for anything longer.\n",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "fields"
+              ],
+              "properties": {
+                "fields": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 50,
+                  "items": {
+                    "$ref": "#/components/schemas/FieldSpec"
+                  }
+                },
+                "file_base64": {
+                  "type": "string",
+                  "description": "The document, base64 (standard or URL-safe; a `data:` URI prefix is accepted)."
+                },
+                "text": {
+                  "type": "string",
+                  "description": "Text to run the fields over instead of a document."
+                },
+                "format": {
+                  "type": "string"
+                },
+                "pages": {
+                  "type": "string"
+                },
+                "ocr": {
+                  "type": "string"
+                },
+                "lang": {
+                  "type": "string"
+                },
+                "clean": {
+                  "type": "boolean"
+                },
+                "include_text": {
+                  "type": "boolean"
+                },
+                "filename": {
+                  "type": "string"
+                }
+              }
+            },
+            "example": {
+              "file_base64": "JVBERi0xLjcK...",
+              "fields": [
+                {
+                  "name": "invoice_number",
+                  "patterns": [
+                    "(?i)invoice\\s*(?:no|number|#)?[:.]?\\s*([A-Z0-9 _./-]+)"
+                  ],
+                  "required": true,
+                  "max_length": 40
+                },
+                {
+                  "name": "total",
+                  "patterns": [
+                    "(?i)total amount due:\\s*([\\d,]+\\.\\d{2})",
+                    "(?i)total\\s+([\\d,]+\\.\\d{2})"
+                  ],
+                  "type": "amount"
+                },
+                {
+                  "name": "invoice_date",
+                  "patterns": [
+                    "(?i)invoice date:?\\s*([^\\n]+)"
+                  ],
+                  "type": "date"
+                }
+              ]
+            }
+          },
+          "multipart/form-data": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "fields"
+              ],
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "format": "binary",
+                  "description": "The document."
+                },
+                "fields": {
+                  "type": "string",
+                  "description": "The field specs as a JSON array."
+                },
+                "text": {
+                  "type": "string",
+                  "description": "Text to run the fields over instead of `file`."
+                },
+                "format": {
+                  "type": "string"
+                },
+                "pages": {
+                  "type": "string"
+                },
+                "ocr": {
+                  "type": "string"
+                },
+                "lang": {
+                  "type": "string"
+                },
+                "clean": {
+                  "type": "string"
+                },
+                "include_text": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "application/octet-stream": {
+            "schema": {
+              "type": "string",
+              "format": "binary"
+            },
+            "description": "The raw document, with `fields` in the query string."
           }
         }
       }
@@ -1304,6 +1559,221 @@
           }
         }
       },
+      "FieldSpec": {
+        "type": "object",
+        "required": [
+          "name",
+          "patterns"
+        ],
+        "additionalProperties": false,
+        "description": "One named value to read out of the text. Unknown keys are refused.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$",
+            "description": "The key of the value in `fields`; unique within the request.",
+            "example": "invoice_number"
+          },
+          "patterns": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "description": "Regular expressions (Rust `regex` syntax), tried in order."
+          },
+          "capture_group": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "The group that is the value: a number (`0` is the whole match) or a group name\n(`(?<name>...)`). It must exist in every pattern. Omitted: group 1 for a pattern that\nhas one, the whole match for a pattern that has none.\n"
+          },
+          "required": {
+            "type": "boolean",
+            "default": false,
+            "description": "A required field that matches nothing is listed in `missing_required`."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "date",
+              "amount",
+              "gstin",
+              "pan",
+              "iban"
+            ],
+            "default": "text",
+            "description": "What the value must be. A match that does not read as its type is not a valid match:\nthe next one is tried. The value is written in one form whatever the print, and\nnothing is corrected (an `O` read for a `0` fails the check):\n\n- `date`: `YYYY-MM-DD`. Numeric (`14/10/2026`, `14.10.26`, `2026-10-14`) or with an\n  English month name (`14 Oct 2026`, `14th October, 2026`, `Oct 14, 2026`, `Wed, 14 Oct 2026`);\n  a day the month does not have is not a date. A two-digit year below 70 is 20xx, else 19xx.\n- `amount`: a plain decimal, `-` when negative (`-`, a trailing `-`, or brackets).\n  A sign and currency around the number are allowed (`Rs.`, `₹`, `USD`, `US$`, `1,250/-`,\n  `1 250,00 €`); digits grouped in threes or Indian style (`1,25,000`), one separator kind.\n  Decimal digits are kept as printed, never rounded: `₹ 1,25,000.50` → `125000.50`.\n- `gstin`: 15 characters, upper-case, spaces and hyphens removed; the check character must match.\n- `pan`: `AAAAA9999A`, upper-case; the shape only.\n- `iban`: upper-case without spaces; the ISO 13616 mod-97 check must pass.\n\nA capture over 64 characters is never a typed value.\n",
+            "example": "date"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "dmy",
+              "mdy",
+              "ymd",
+              "point",
+              "comma"
+            ],
+            "description": "`date`: how an all-numeric date is read, `dmy` (default), `mdy` or `ymd`; four digits\nfirst is always year-month-day. `amount`: the decimal mark, `point` (default,\n`1,250.00`) or `comma` (`1.250,00`). Refused for other types.\n"
+          },
+          "normalization": {
+            "type": "string",
+            "enum": [
+              "trim",
+              "none"
+            ],
+            "default": "trim",
+            "description": "`trim` removes leading and trailing whitespace; `none` keeps the capture as matched.\nA `text` field's only: a typed value is always written in its type's form.\n"
+          },
+          "max_length": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "description": "A longer value is not a valid match; the next one is tried. Characters of the value as returned."
+          },
+          "multiple": {
+            "type": "boolean",
+            "default": false,
+            "description": "Return every distinct valid match, in order, as an array."
+          },
+          "selection": {
+            "type": "string",
+            "enum": [
+              "first"
+            ],
+            "default": "first",
+            "description": "Which valid match is the value. Only `first` today."
+          }
+        }
+      },
+      "FieldsExtraction": {
+        "type": "object",
+        "required": [
+          "kind",
+          "fields",
+          "matched",
+          "missing_required",
+          "char_count",
+          "truncated"
+        ],
+        "description": "`kind` is the document's, or `text` when `text` was sent; a PDF or image adds the same\npage and OCR details as its text extraction.\n",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "pdf",
+              "office",
+              "image",
+              "text"
+            ]
+          },
+          "format": {
+            "type": "string",
+            "description": "As in the text extraction; absent for `text`."
+          },
+          "format_source": {
+            "$ref": "#/components/schemas/FormatSource"
+          },
+          "fields": {
+            "type": "object",
+            "description": "Every requested field, in request order.",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "matched": {
+            "type": "object",
+            "description": "What each value was read from, as printed, keyed like `fields`: the text to look for\nwhen marking a value, since a typed value (`2026-10-14`) is not in the text and its\nprint (`14 Oct 2026`) is. A `multiple` field lists every distinct print of the values\nkept; `null` where nothing matched.\n",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "missing_required": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Required fields that matched nothing, in request order."
+          },
+          "char_count": {
+            "type": "integer",
+            "description": "Unicode scalar values in the text the fields ran over."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "The 4 Mi-character budget ran out: later text was never searched."
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "pages_extracted": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "incomplete": {
+            "type": "boolean",
+            "description": "The deadline passed before every page was read; values on the missing pages were not seen."
+          },
+          "ocr": {
+            "$ref": "#/components/schemas/OcrInfo"
+          },
+          "failed_pages": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "text": {
+            "type": "string",
+            "description": "The text the fields ran over (`include_text` only)."
+          },
+          "ignored_params": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "Problem": {
         "type": "object",
         "description": "RFC 9457 problem details.",
@@ -1329,7 +1799,7 @@
           },
           "parameter": {
             "type": "string",
-            "description": "The offending parameter (400 only)."
+            "description": "The offending parameter (400 only); for a field spec, its place, e.g. `fields[1].patterns[0]`."
           },
           "accepted": {
             "type": "string",

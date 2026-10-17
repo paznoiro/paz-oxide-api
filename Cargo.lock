@@ -1459,6 +1459,7 @@ dependencies = [
  "pdf_oxide",
  "quick-xml",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml_ng",

@@ -1,5 +1,6 @@
 //! Oxide API: text and markdown extraction from PDF, Office and OpenDocument
-//! files, with OCR for scanned PDFs and images.
+//! files, with OCR for scanned PDFs and images, and named fields read out of
+//! that text by regular expressions.
 
 pub mod admission;
 pub mod auth;
@@ -7,6 +8,7 @@ pub mod blocking;
 pub mod config;
 pub mod detect;
 pub mod error;
+pub mod fields;
 pub mod handlers;
 pub mod io;
 pub mod metrics;
@@ -129,6 +131,7 @@ pub fn build_router(st: Arc<AppState>) -> Router {
     let v1 = Router::new()
         .route("/v1/extract/text", post(handlers::extract::text))
         .route("/v1/extract/markdown", post(handlers::extract::markdown))
+        .route("/v1/extract/fields", post(handlers::extract::fields))
         .route("/v1/info", post(handlers::info::info))
         // Layers run outside-in: auth first, then admission, so an
         // unauthenticated request never takes a permit.

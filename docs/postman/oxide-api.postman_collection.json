@@ -134,6 +134,117 @@
           ]
         },
         {
+          "name": "POST /v1/extract/fields (multipart)",
+          "request": {
+            "description": "Named values read out of any supported file with regular expressions. The document is read once, exactly as `/v1/extract/text` reads it (OCR where pages need it), and every field runs over that text. Each field's patterns are tried in order and the first valid match wins; a field that matches nothing is `null`, and a required one is also listed in `missing_required`.\n\nThe `fields` part is the JSON array of field specs. Add `include_text=true` to get the text back too. Patterns are Rust regex syntax: `(?i)` and `\\s+` across lines work, look-around does not.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/fields",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "fields"]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "Pick any supported file: PDF, DOCX / XLSX / PPTX / DOC / XLS / PPT, ODT / ODS / ODP, or an image (PNG / JPEG / TIFF / WebP / GIF / BMP / JP2 / PNM / TGA).",
+                  "src": ""
+                },
+                {
+                  "key": "fields",
+                  "type": "text",
+                  "value": "[\n  {\n    \"name\": \"invoice_number\",\n    \"patterns\": [\n      \"(?i)invoice\\\\s*(?:no|number|#)?[:.]?\\\\s*([A-Z0-9 _./-]+)\"\n    ],\n    \"required\": true,\n    \"max_length\": 40\n  },\n  {\n    \"name\": \"total\",\n    \"patterns\": [\n      \"(?i)total amount due:?\\\\s*([\\\\d,]+\\\\.\\\\d{2})\",\n      \"(?i)total\\\\s+([\\\\d,]+\\\\.\\\\d{2})\"\n    ]\n  },\n  {\n    \"name\": \"po_number\",\n    \"patterns\": [\n      \"(?i)PO Number\\\\s+([^\\\\n]+)\"\n    ]\n  }\n]",
+                  "description": "JSON array of field specs: name, patterns, capture_group, required, type (text|date|amount|gstin|pan|iban), format (dmy|mdy|ymd for dates, point|comma for amounts), normalization (trim|none), max_length, multiple, selection (first)."
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with field values\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.fields).to.be.an(\"object\");",
+                  "    pm.expect(j.matched).to.be.an(\"object\");",
+                  "    pm.expect(j.missing_required).to.be.an(\"array\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/fields (JSON, text only)",
+          "request": {
+            "description": "Runs field specs over text you already have — no document, nothing read again. Swap `text` for `file_base64` to read a document instead (not both).",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/fields",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "extract", "fields"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Tax Invoice\\nInvoice No: INV-2026/0042\\nInvoice Date: 14 Oct 2026\\nPO Number\\n  PO-77/A\\nTotal amount due: 1,250.00\",\n  \"fields\": [\n    {\n      \"name\": \"invoice_number\",\n      \"patterns\": [\n        \"(?i)invoice\\\\s*(?:no|number|#)?[:.]?\\\\s*([A-Z0-9 _./-]+)\"\n      ],\n      \"required\": true,\n      \"max_length\": 40\n    },\n    {\n      \"name\": \"total\",\n      \"patterns\": [\n        \"(?i)total amount due:?\\\\s*([\\\\d,]+\\\\.\\\\d{2})\",\n        \"(?i)total\\\\s+([\\\\d,]+\\\\.\\\\d{2})\"\n      ],\n      \"type\": \"amount\"\n    },\n    {\n      \"name\": \"invoice_date\",\n      \"patterns\": [\n        \"(?i)invoice date:?\\\\s*([^\\\\n]+)\"\n      ],\n      \"type\": \"date\"\n    },\n    {\n      \"name\": \"po_number\",\n      \"patterns\": [\n        \"(?i)PO Number\\\\s+([^\\\\n]+)\"\n      ]\n    }\n  ],\n  \"include_text\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with field values\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    var j = pm.response.json();",
+                  "    pm.expect(j.fields).to.be.an(\"object\");",
+                  "    pm.expect(j.matched).to.be.an(\"object\");",
+                  "    pm.expect(j.missing_required).to.be.an(\"array\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "POST /v1/extract/text (raw body, text/plain)",
           "request": {
             "description": "Raw bytes as body + `Accept: text/plain` returns raw text (metadata in `X-Oxide-*` headers, e.g. `X-Oxide-Kind: image`, `X-Oxide-Ocr-Status`). Example query: `?pages=2`. In Postman: Body -> Binary -> pick file.",

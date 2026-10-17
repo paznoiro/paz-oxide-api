@@ -91,6 +91,7 @@ A PDF response (`/v1/extract/text`):
 |---|---|---|---|
 | `POST /v1/extract/text` | plain text | per-page native text, OCR for pages that need it | OCR text per page |
 | `POST /v1/extract/markdown` | headings, lists, tables | per-page markdown with heading detection | OCR lines and paragraphs |
+| `POST /v1/extract/fields` | named values from the text, by regular expression | the same, over native + OCR text | the same, over OCR text |
 | `POST /v1/info` | metadata, sheet names + dimensions, slide count | metadata, page count, encryption, page geometry | page count, pixel dimensions |
 | `GET /healthz` `/readyz` `/version` `/metrics` `/openapi.json` `/openapi.yaml` `/docs` | unauthenticated ops endpoints | | |
 
@@ -113,6 +114,67 @@ Parameters that don't apply to the detected document kind are ignored and listed
 `ignored_params`. The full contract is in [openapi.yaml](openapi.yaml) (served at `/openapi.json`,
 with an interactive reference at `/docs`). A Postman collection with examples for every format is in
 [docs/postman](docs/postman/README.md).
+
+### Fields
+
+`/v1/extract/fields` reads the document exactly as `/v1/extract/text` does, then runs named
+regular-expression fields over that one text. OCR happens once, however many fields there are.
+Send `text` instead of a document to run fields over text you already have:
+
+```sh
+curl -H "$AUTH" -H 'Content-Type: application/json' http://localhost:8080/v1/extract/fields -d '{
+  "file_base64": "'"$(base64 < scan.pdf | tr -d '\n')"'",
+  "fields": [
+    {"name": "invoice_number", "patterns": ["(?i)invoice\\s*(?:no|number|#)?[:.]?\\s*([A-Z0-9 _./-]+)"], "required": true, "max_length": 40},
+    {"name": "total", "patterns": ["(?i)total amount due:?\\s*([\\d,]+\\.\\d{2})", "(?i)total\\s+([\\d,]+\\.\\d{2})"], "type": "amount"},
+    {"name": "invoice_date", "patterns": ["(?i)invoice date:?\\s*([^\\n]+)"], "type": "date"},
+    {"name": "po_number", "patterns": ["(?i)PO Number\\s+([^\\n]+)"]}
+  ]}'
+```
+
+```json
+{ "kind": "pdf", "format": "pdf", "format_source": "sniff",
+  "fields": { "invoice_number": "4471", "total": "1250.00", "invoice_date": "2026-10-14", "po_number": null },
+  "matched": { "invoice_number": "4471", "total": "1,250.00", "invoice_date": "14 Oct 2026", "po_number": null },
+  "missing_required": [], "char_count": 104, "truncated": false,
+  "page_count": 1, "pages_extracted": [1], "incomplete": false, "ocr": { "status": "ocr", ... } }
+```
+
+| Spec key | Default | Meaning |
+|---|---|---|
+| `name` | *(required)* | key in `fields`: a letter, then letters, digits, `_` (≤ 64) |
+| `patterns` | *(required)* | 1–10 regular expressions, tried in order; the first valid match wins |
+| `capture_group` | group 1, or the whole match when the pattern has no group | a number (`0` = whole match) or a group name; must exist in every pattern |
+| `required` | `false` | a required field that matches nothing is listed in `missing_required` (still `200`) |
+| `type` | `text` | `text`, `date`, `amount`, `gstin`, `pan`, `iban`: a match that doesn't read as the type is skipped |
+| `format` | `dmy` / `point` | `date`: `dmy`, `mdy`, `ymd` for all-numeric dates; `amount`: decimal mark `point` or `comma` |
+| `normalization` | `trim` | `trim` or `none`; `text` fields only |
+| `max_length` | none | a longer value is skipped (the next one is tried), never cut down |
+| `multiple` | `false` | every distinct valid match, in order, as an array |
+| `selection` | `first` | the only value today |
+
+- **Typed fields check and rewrite the value.** `date` → `2026-10-14` from `14/10/2026`,
+  `14 Oct 2026`, `Oct 14, 2026` and the like (English month names; no 31 April). `amount` → a plain
+  decimal from `₹ 1,25,000.50`, `USD 1,250`, `(1,250.00)`, `1 250,00 €` (`format: comma`): digits
+  grouped in threes or the Indian way, decimals never rounded. `gstin` must pass its check
+  character, `iban` its mod-97 check, `pan` its shape. So "Date: see overleaf" is skipped and the
+  next date is taken, and a misread GSTIN is dropped rather than stored. `matched` returns what each
+  value was read from, as printed, so a caller can mark it in the text.
+- **Every requested field is in the response**, `null` when nothing matched. (The other endpoints
+  leave optional keys out; here the absence is the answer.) Unknown spec keys are a `400`.
+- **Rust `regex` syntax**, linear time: `(?i)`, `(?m)`, `(?s)` work; look-around and backreferences
+  don't and are refused with the engine's reason. A value on the next line is `Label\s+([^\n]+)`.
+  `\d`, `\w` and `(?i)` are Unicode-aware. Values are reported as read: no `O`→`0` correction.
+- **Specs are checked first**, so a bad pattern is a `400` (with `parameter: fields[1].patterns[0]`)
+  and costs no OCR. Limits: 50 fields, 100 patterns, 1000 characters per pattern. Broad counted
+  classes compile large (`\w{1,200}` ≈ 10 MiB; `[A-Za-z0-9]{1,200}` ≈ 0.2 MiB), and a request's
+  larger patterns share a 40 MiB budget.
+- **`include_text=true`** also returns the text, so an indexer gets text and fields from one read.
+- **Matching has its own deadline**: `OXIDE_API_PROCESS_TIMEOUT_SECS`, started once the text is read,
+  since OCR may have used the request's. A request that OCRs can therefore run past
+  `OXIDE_API_OCR_TIMEOUT_SECS` by up to that much (matching normally takes milliseconds).
+- In a JSON body `fields` is the array; as a multipart part or query param it's the array as a JSON
+  string. `Accept: text/plain` isn't negotiated here: the response is always JSON.
 
 ### Errors
 

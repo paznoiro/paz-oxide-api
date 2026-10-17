@@ -1,6 +1,7 @@
-//! `/v1/extract/{text,markdown}`: phase 1 (native, CPU pool) + phase 2
+//! `/v1/extract/{text,markdown,fields}`: phase 1 (native, CPU pool) + phase 2
 //! (OCR pool) orchestration. Images take the PDF path with every page
-//! routed to OCR.
+//! routed to OCR. `fields` reads the document exactly as `text` does, then
+//! runs its field specs over that one text.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,13 +10,15 @@ use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use serde::Serialize;
+use serde_json::Value;
 
 use super::{COMMON_PARAMS, await_job, format_param, parse_bool};
 use crate::AppState;
 use crate::admission::Admitted;
 use crate::detect::{self, DocKind, FormatSource};
 use crate::error::ApiError;
-use crate::io::{self, Params};
+use crate::fields::{self, Extracted, Field, FieldValues};
+use crate::io::{self, Params, Shape};
 use crate::office::OfficeFormat;
 use crate::pdf::lang::{Lang, LangParam, LangSource};
 use crate::pdf::route::{OcrMode, OcrReason};
@@ -31,12 +34,13 @@ const GRACE: Duration = Duration::from_secs(2);
 enum Endpoint {
     Text,
     Markdown,
+    Fields,
 }
 
 impl Endpoint {
     fn raw_type(self) -> &'static str {
         match self {
-            Endpoint::Text => "text/plain",
+            Endpoint::Text | Endpoint::Fields => "text/plain",
             Endpoint::Markdown => "text/markdown",
         }
     }
@@ -50,6 +54,10 @@ pub async fn markdown(State(st): State<Arc<AppState>>, req: Request) -> Response
     extract(st, req, Endpoint::Markdown).await.unwrap_or_else(IntoResponse::into_response)
 }
 
+pub async fn fields(State(st): State<Arc<AppState>>, req: Request) -> Response {
+    extract_fields(st, req).await.unwrap_or_else(IntoResponse::into_response)
+}
+
 struct ExtractParams {
     format: Option<DocKind>,
     pages: Option<Vec<usize>>,
@@ -57,17 +65,21 @@ struct ExtractParams {
     lang: LangParam,
     detect_headings: bool,
     clean: bool,
+    include_text: bool,
     provided: Vec<String>,
 }
 
 /// Params for paged kinds (PDF, images).
 const PAGED_PARAMS: [&str; 3] = ["pages", "ocr", "lang"];
 
-/// Params that apply to every extraction (any kind, both endpoints).
+/// Params that apply to every extraction (any kind, every endpoint).
 const EXTRACT_PARAMS: [&str; 1] = ["clean"];
 
+/// Params of `/v1/extract/fields` alone.
+const FIELDS_PARAMS: [&str; 1] = ["include_text"];
+
 impl ExtractParams {
-    fn parse(p: &Params) -> Result<Self, ApiError> {
+    fn parse(p: &Params, ep: Endpoint) -> Result<Self, ApiError> {
         let pages = p
             .get("pages")
             .map(|v| pdf::parse_pages(v).ok_or_else(|| ApiError::invalid_param("pages", v, "1-based pages and ranges, e.g. 1-3,5")))
@@ -84,19 +96,27 @@ impl ExtractParams {
             .unwrap_or(LangParam::Auto);
         let detect_headings = p.get("detect_headings").map(|v| parse_bool("detect_headings", v)).transpose()?.unwrap_or(true);
         let clean = p.get("clean").map(|v| parse_bool("clean", v)).transpose()?.unwrap_or(false);
-        Ok(Self { format: format_param(p)?, pages, ocr, lang, detect_headings, clean, provided: p.keys().cloned().collect() })
+        let include_text = match ep {
+            Endpoint::Fields => p.get("include_text").map(|v| parse_bool("include_text", v)).transpose()?.unwrap_or(false),
+            Endpoint::Text | Endpoint::Markdown => false,
+        };
+        Ok(Self { format: format_param(p)?, pages, ocr, lang, detect_headings, clean, include_text, provided: p.keys().cloned().collect() })
     }
 
     /// Params that don't apply to the detected kind (or aren't known at all).
-    fn ignored(&self, kind: DocKind, ep: Endpoint) -> Vec<String> {
+    /// `kind` is `None` for fields read from supplied text: no document.
+    fn ignored(&self, kind: Option<DocKind>, ep: Endpoint) -> Vec<String> {
         self.provided
             .iter()
             .filter(|k| {
                 let k = k.as_str();
-                let applies = COMMON_PARAMS.contains(&k)
-                    || EXTRACT_PARAMS.contains(&k)
-                    || (kind.is_paged() && PAGED_PARAMS.contains(&k))
-                    || (kind == DocKind::Pdf && ep == Endpoint::Markdown && k == "detect_headings");
+                let applies = EXTRACT_PARAMS.contains(&k)
+                    || (ep == Endpoint::Fields && FIELDS_PARAMS.contains(&k))
+                    || kind.is_some_and(|kind| {
+                        COMMON_PARAMS.contains(&k)
+                            || (kind.is_paged() && PAGED_PARAMS.contains(&k))
+                            || (kind == DocKind::Pdf && ep == Endpoint::Markdown && k == "detect_headings")
+                    });
                 !applies
             })
             .cloned()
@@ -113,49 +133,247 @@ async fn extract(st: Arc<AppState>, mut req: Request, ep: Endpoint) -> Result<Re
     let input = tokio::time::timeout(st.cfg.body_timeout, io::read_input(req, st.cfg.max_body_bytes))
         .await
         .map_err(|_| ApiError::body_timeout())??;
-    let params = ExtractParams::parse(&input.params)?;
+    let params = ExtractParams::parse(&input.params, ep)?;
     let detected = detect::detect(&input.bytes, params.format, input.filename.as_deref())?;
-    metrics::counter!("oxide_documents_total", "kind" => detected.kind.kind_str(), "format" => detected.kind.format_str())
-        .increment(1);
-    let ignored = params.ignored(detected.kind, ep);
+    count_document(detected.kind);
+    let ignored = params.ignored(Some(detected.kind), ep);
     let mode = match ep {
-        Endpoint::Text => Mode::Text,
+        Endpoint::Text | Endpoint::Fields => Mode::Text,
         Endpoint::Markdown => Mode::Markdown { detect_headings: params.detect_headings },
     };
-    let ctx = Ctx { st, admitted, output, source: detected.source, ignored, clean: params.clean };
-    match detected.kind {
-        DocKind::Office(fmt) => office_flow(ctx, input.bytes, fmt, mode).await,
-        DocKind::Pdf => pdf_flow(ctx, input.bytes, &params, mode).await,
-        DocKind::Image(fmt) => image_flow(ctx, input.bytes, fmt, &params).await,
-    }
+    let ctx = Ctx { st, admitted, clean: params.clean };
+    let ext = read_document(&ctx, input.bytes, detected.kind, &params, mode).await?;
+    Ok(render(ext, detected.source, output, &ignored))
+}
+
+fn count_document(kind: DocKind) {
+    metrics::counter!("oxide_documents_total", "kind" => kind.kind_str(), "format" => kind.format_str()).increment(1);
 }
 
 struct Ctx {
     st: Arc<AppState>,
     admitted: Admitted,
-    output: Output,
-    source: FormatSource,
-    ignored: Vec<String>,
     clean: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Office
-// ---------------------------------------------------------------------------
+/// A document's final text — normalized, cleaned when asked, within the text
+/// budget — and how it was read.
+struct Extraction {
+    kind: DocKind,
+    text: String,
+    truncated: bool,
+    /// PDFs and images only.
+    paged: Option<Paged>,
+    engine: Engine,
+    timing: Timing,
+}
 
+/// What a PDF or image response adds to the text.
 #[derive(Serialize)]
-struct OfficeResponse<'a> {
+struct Paged {
+    page_count: usize,
+    pages_extracted: Vec<usize>,
+    incomplete: bool,
+    ocr: OcrInfo,
+    /// Pages whose native text could not be extracted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failed_pages: Vec<usize>,
+}
+
+/// Reads a document to its final text, the one way every endpoint here does.
+async fn read_document(ctx: &Ctx, bytes: Bytes, kind: DocKind, params: &ExtractParams, mode: Mode) -> Result<Extraction, ApiError> {
+    match kind {
+        DocKind::Office(fmt) => office_flow(ctx, bytes, fmt, mode).await,
+        DocKind::Pdf => pdf_flow(ctx, bytes, params, mode).await,
+        DocKind::Image(fmt) => image_flow(ctx, bytes, fmt, params).await,
+    }
+}
+
+/// The `/v1/extract/{text,markdown}` response: JSON, or the raw text with
+/// its metadata in `X-Oxide-*` headers.
+#[derive(Serialize)]
+struct ExtractResponse<'a> {
     kind: &'static str,
     format: &'static str,
     format_source: FormatSource,
     text: &'a str,
     char_count: usize,
     truncated: bool,
+    #[serde(flatten)]
+    paged: Option<&'a Paged>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     ignored_params: &'a [String],
 }
 
-async fn office_flow(ctx: Ctx, bytes: Bytes, fmt: OfficeFormat, mode: Mode) -> Result<Response, ApiError> {
+fn render(ext: Extraction, source: FormatSource, output: Output, ignored: &[String]) -> Response {
+    let char_count = ext.text.chars().count();
+    let (kind, format) = (ext.kind.kind_str(), ext.kind.format_str());
+    match output {
+        Output::Json => respond::json(
+            &ExtractResponse {
+                kind,
+                format,
+                format_source: source,
+                text: &ext.text,
+                char_count,
+                truncated: ext.truncated,
+                paged: ext.paged.as_ref(),
+                ignored_params: ignored,
+            },
+            ext.engine,
+            &ext.timing,
+        ),
+        Output::Raw(media) => {
+            let mut meta = vec![
+                ("x-oxide-kind", kind.to_string()),
+                ("x-oxide-format", format.to_string()),
+                ("x-oxide-format-source", source_str(source).to_string()),
+                ("x-oxide-truncated", ext.truncated.to_string()),
+            ];
+            if let Some(paged) = &ext.paged {
+                let join = |v: &[usize]| v.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+                meta.push(("x-oxide-incomplete", paged.incomplete.to_string()));
+                meta.push(("x-oxide-ocr-status", paged.ocr.status.as_str().to_string()));
+                meta.push(("x-oxide-page-count", paged.page_count.to_string()));
+                meta.push(("x-oxide-pages-extracted", join(&paged.pages_extracted)));
+                if let Some(l) = paged.ocr.lang {
+                    meta.push(("x-oxide-lang", l.code().to_string()));
+                }
+                if !paged.ocr.pages_needing_ocr.is_empty() {
+                    meta.push(("x-oxide-pages-needing-ocr", join(&paged.ocr.pages_needing_ocr)));
+                }
+            }
+            meta.push(("x-oxide-char-count", char_count.to_string()));
+            respond::raw(ext.text, media, ext.engine, &ext.timing, &meta)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fields
+// ---------------------------------------------------------------------------
+
+/// The `/v1/extract/fields` response. Always JSON: the values are the point,
+/// and a raw-text mode would have nowhere to put them.
+#[derive(Serialize)]
+struct FieldsResponse<'a> {
+    /// `pdf`, `office` or `image`; `text` when the caller sent the text.
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format_source: Option<FormatSource>,
+    fields: &'a FieldValues,
+    /// What each value was read from, as printed: a typed value is written in
+    /// its type's form, so this is what to look for in the text.
+    matched: &'a FieldValues,
+    missing_required: &'a [String],
+    char_count: usize,
+    truncated: bool,
+    #[serde(flatten)]
+    paged: Option<&'a Paged>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    ignored_params: &'a [String],
+}
+
+/// Keys `/v1/extract/fields` takes whole rather than as scalar params.
+const FIELDS_SHAPE: Shape = Shape { whole: &["fields", "text"], document_optional: true };
+
+async fn extract_fields(st: Arc<AppState>, mut req: Request) -> Result<Response, ApiError> {
+    let admitted = req
+        .extensions_mut()
+        .remove::<Admitted>()
+        .ok_or_else(|| ApiError::internal("admission state missing"))?;
+    let input = tokio::time::timeout(st.cfg.body_timeout, io::read_input_shaped(req, st.cfg.max_body_bytes, FIELDS_SHAPE))
+        .await
+        .map_err(|_| ApiError::body_timeout())??;
+    // Specs first: a bad pattern must cost a 400, not an OCR run.
+    let specs = input
+        .whole
+        .get("fields")
+        .ok_or_else(|| ApiError::bad_request("`fields` is required: a JSON array of field specs").with("parameter", "fields"))?;
+    let fields = fields::parse(specs)?;
+    let params = ExtractParams::parse(&input.params, Endpoint::Fields)?;
+    let ctx = Ctx { st, admitted, clean: params.clean };
+
+    match (input.bytes.is_empty(), input.whole.get("text")) {
+        (false, Some(_)) => Err(ApiError::bad_request("send either a document or `text`, not both").with("parameter", "text")),
+        (true, None) => Err(ApiError::bad_request(
+            "nothing to read: send the document (multipart `file`, JSON `file_base64` or the raw body) or its `text`",
+        )
+        .with("parameter", "text")
+        .with("accepted", "a document, or `text` to run the fields over")),
+        (true, Some(Value::String(supplied))) => {
+            let mut budget = TextBudget::new(ctx.st.cfg.max_text_chars);
+            let text = budget.take(normalize_arabic_forms(supplied.clone()));
+            let text = if ctx.clean { collapse_whitespace(&text) } else { text };
+            let ignored = params.ignored(None, Endpoint::Fields);
+            let (found, text, took) = match_fields(&ctx, fields, text).await?;
+            let timing = Timing { queue: ctx.admitted.queue_wait, extract: took, ..Default::default() };
+            let body = FieldsResponse {
+                kind: "text",
+                format: None,
+                format_source: None,
+                fields: &found.values,
+                matched: &found.matched,
+                missing_required: &found.missing_required,
+                char_count: text.chars().count(),
+                truncated: budget.truncated,
+                paged: None,
+                text: params.include_text.then_some(text.as_str()),
+                ignored_params: &ignored,
+            };
+            Ok(respond::json(&body, Engine::Native, &timing))
+        }
+        (true, Some(_)) => Err(ApiError::bad_request("`text` must be a string").with("parameter", "text")),
+        (false, None) => {
+            let detected = detect::detect(&input.bytes, params.format, input.filename.as_deref())?;
+            count_document(detected.kind);
+            let ignored = params.ignored(Some(detected.kind), Endpoint::Fields);
+            let ext = read_document(&ctx, input.bytes, detected.kind, &params, Mode::Text).await?;
+            let Extraction { kind, text, truncated, paged, engine, mut timing } = ext;
+            let (found, text, took) = match_fields(&ctx, fields, text).await?;
+            timing.extract += took;
+            let body = FieldsResponse {
+                kind: kind.kind_str(),
+                format: Some(kind.format_str()),
+                format_source: Some(detected.source),
+                fields: &found.values,
+                matched: &found.matched,
+                missing_required: &found.missing_required,
+                char_count: text.chars().count(),
+                truncated,
+                paged: paged.as_ref(),
+                text: params.include_text.then_some(text.as_str()),
+                ignored_params: &ignored,
+            };
+            Ok(respond::json(&body, engine, &timing))
+        }
+    }
+}
+
+/// Runs the fields over the text on the CPU pool, with a deadline of its own:
+/// the document's may already be spent on OCR. So a request that OCRs can run
+/// past `ocr_timeout` by up to `process_timeout` here; matching is linear in
+/// the text, so in practice it takes milliseconds.
+async fn match_fields(ctx: &Ctx, fields: Vec<Field>, text: String) -> Result<(Extracted, String, Duration), ApiError> {
+    let timeout = ctx.st.cfg.process_timeout;
+    let deadline = Instant::now() + timeout;
+    let rx = ctx.st.cpu.spawn(ctx.admitted.permit.clone(), timeout, move || {
+        let t = Instant::now();
+        let found = fields::extract(&fields, &text);
+        Ok((found, text, t.elapsed()))
+    });
+    await_job(rx, deadline).await
+}
+
+// ---------------------------------------------------------------------------
+// Office
+// ---------------------------------------------------------------------------
+
+async fn office_flow(ctx: &Ctx, bytes: Bytes, fmt: OfficeFormat, mode: Mode) -> Result<Extraction, ApiError> {
     let deadline = ctx.admitted.admitted_at + ctx.st.cfg.process_timeout;
     let max_chars = ctx.st.cfg.max_text_chars;
     let clean = ctx.clean;
@@ -170,37 +388,13 @@ async fn office_flow(ctx: Ctx, bytes: Bytes, fmt: OfficeFormat, mode: Mode) -> R
         Ok((text, budget.truncated || cut_short, parse, t.elapsed()))
     });
     let (text, truncated, parse, extract) = await_job(rx, deadline).await?;
-    let timing = Timing { queue: ctx.admitted.queue_wait, parse, extract, ocr: None };
-    let char_count = text.chars().count();
-    let format = fmt.extension();
-    let engine = if fmt.is_odf() { Engine::Native } else { Engine::Office };
-    Ok(match ctx.output {
-        Output::Json => respond::json(
-            &OfficeResponse {
-                kind: "office",
-                format,
-                format_source: ctx.source,
-                text: &text,
-                char_count,
-                truncated,
-                ignored_params: &ctx.ignored,
-            },
-            engine,
-            &timing,
-        ),
-        Output::Raw(media) => respond::raw(
-            text,
-            media,
-            engine,
-            &timing,
-            &[
-                ("x-oxide-kind", "office".into()),
-                ("x-oxide-format", format.into()),
-                ("x-oxide-format-source", source_str(ctx.source).into()),
-                ("x-oxide-truncated", truncated.to_string()),
-                ("x-oxide-char-count", char_count.to_string()),
-            ],
-        ),
+    Ok(Extraction {
+        kind: DocKind::Office(fmt),
+        text,
+        truncated,
+        paged: None,
+        engine: if fmt.is_odf() { Engine::Native } else { Engine::Office },
+        timing: Timing { queue: ctx.admitted.queue_wait, parse, extract, ocr: None },
     })
 }
 
@@ -263,26 +457,6 @@ struct OcrInfo {
     reasons: Vec<PageReason>,
 }
 
-/// The response for paged kinds: PDFs and images.
-#[derive(Serialize)]
-struct PagedResponse<'a> {
-    kind: &'static str,
-    format: &'static str,
-    format_source: FormatSource,
-    text: &'a str,
-    char_count: usize,
-    truncated: bool,
-    page_count: usize,
-    pages_extracted: Vec<usize>,
-    incomplete: bool,
-    ocr: OcrInfo,
-    /// Pages whose native text could not be extracted.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    failed_pages: Vec<usize>,
-    #[serde(skip_serializing_if = "<[String]>::is_empty")]
-    ignored_params: &'a [String],
-}
-
 /// Per-page outcome after phase 2.
 struct OutPage {
     index: usize,
@@ -291,7 +465,7 @@ struct OutPage {
     merged: bool,
 }
 
-async fn pdf_flow(ctx: Ctx, bytes: Bytes, params: &ExtractParams, mode: Mode) -> Result<Response, ApiError> {
+async fn pdf_flow(ctx: &Ctx, bytes: Bytes, params: &ExtractParams, mode: Mode) -> Result<Extraction, ApiError> {
     let cfg = &ctx.st.cfg;
     let native_deadline = ctx.admitted.admitted_at + cfg.process_timeout;
     let job = pdf::PdfJob {
@@ -307,7 +481,7 @@ async fn pdf_flow(ctx: Ctx, bytes: Bytes, params: &ExtractParams, mode: Mode) ->
     paged_flow(ctx, p1, params, DocKind::Pdf).await
 }
 
-async fn image_flow(ctx: Ctx, bytes: Bytes, fmt: ImageFormat, params: &ExtractParams) -> Result<Response, ApiError> {
+async fn image_flow(ctx: &Ctx, bytes: Bytes, fmt: ImageFormat, params: &ExtractParams) -> Result<Extraction, ApiError> {
     let cfg = &ctx.st.cfg;
     let deadline = ctx.admitted.admitted_at + cfg.process_timeout;
     let (pages, ocr, max_pixels, max_pages) = (params.pages.clone(), params.ocr, cfg.max_image_pixels, cfg.max_pdf_pages);
@@ -319,7 +493,7 @@ async fn image_flow(ctx: Ctx, bytes: Bytes, fmt: ImageFormat, params: &ExtractPa
 }
 
 /// Phase 2 (OCR where the plan needs it) and the response.
-async fn paged_flow(ctx: Ctx, p1: Phase1, params: &ExtractParams, kind: DocKind) -> Result<Response, ApiError> {
+async fn paged_flow(ctx: &Ctx, p1: Phase1, params: &ExtractParams, kind: DocKind) -> Result<Extraction, ApiError> {
     let needing: Vec<(usize, OcrReason)> = p1.pages.iter().filter_map(|p| p.ocr.map(|r| (p.index, r))).collect();
     let reasons: Vec<PageReason> = needing.iter().map(|(i, r)| PageReason { page: i + 1, reason: *r }).collect();
 
@@ -331,7 +505,7 @@ async fn paged_flow(ctx: Ctx, p1: Phase1, params: &ExtractParams, kind: DocKind)
         // Images have no native text to fall back on, so an image whose
         // every page failed is an error, as with `ocr=force`.
         let strict = params.ocr == OcrMode::Force || matches!(kind, DocKind::Image(_));
-        run_ocr(&ctx, &p1, &needing, params.lang, strict).await?
+        run_ocr(ctx, &p1, &needing, params.lang, strict).await?
     };
 
     finish(ctx, p1, phase2, reasons, kind)
@@ -485,7 +659,7 @@ fn lang_source_str(s: LangSource) -> &'static str {
     }
 }
 
-fn finish(ctx: Ctx, p1: Phase1, p2: Phase2, reasons: Vec<PageReason>, kind: DocKind) -> Result<Response, ApiError> {
+fn finish(ctx: &Ctx, p1: Phase1, p2: Phase2, reasons: Vec<PageReason>, kind: DocKind) -> Result<Extraction, ApiError> {
     let Phase1 { pages, page_count, incomplete: p1_incomplete, truncated: p1_truncated, parse_time, extract_time, .. } = p1;
     let mut ocr_texts: std::collections::HashMap<usize, String> = p2.texts.into_iter().collect();
     let mut out_pages: Vec<OutPage> = Vec::with_capacity(pages.len());
@@ -552,48 +726,12 @@ fn finish(ctx: Ctx, p1: Phase1, p2: Phase2, reasons: Vec<PageReason>, kind: DocK
         reasons,
     };
     let timing = Timing { queue: ctx.admitted.queue_wait, parse: parse_time, extract: extract_time, ocr: p2.elapsed };
-    let char_count = text.chars().count();
-    let (kind_str, format) = (kind.kind_str(), kind.format_str());
-
-    Ok(match ctx.output {
-        Output::Json => respond::json(
-            &PagedResponse {
-                kind: kind_str,
-                format,
-                format_source: ctx.source,
-                text: &text,
-                char_count,
-                truncated,
-                page_count,
-                pages_extracted,
-                incomplete,
-                ocr,
-                failed_pages: native_failed,
-                ignored_params: &ctx.ignored,
-            },
-            Engine::Pdf,
-            &timing,
-        ),
-        Output::Raw(media) => {
-            let join = |v: &[usize]| v.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
-            let mut meta = vec![
-                ("x-oxide-kind", kind_str.to_string()),
-                ("x-oxide-format", format.to_string()),
-                ("x-oxide-format-source", source_str(ctx.source).to_string()),
-                ("x-oxide-truncated", truncated.to_string()),
-                ("x-oxide-incomplete", incomplete.to_string()),
-                ("x-oxide-ocr-status", ocr.status.as_str().to_string()),
-                ("x-oxide-page-count", page_count.to_string()),
-                ("x-oxide-pages-extracted", join(&pages_extracted)),
-                ("x-oxide-char-count", char_count.to_string()),
-            ];
-            if let Some(l) = ocr.lang {
-                meta.push(("x-oxide-lang", l.code().to_string()));
-            }
-            if !ocr.pages_needing_ocr.is_empty() {
-                meta.push(("x-oxide-pages-needing-ocr", join(&ocr.pages_needing_ocr)));
-            }
-            respond::raw(text, media, Engine::Pdf, &timing, &meta)
-        }
+    Ok(Extraction {
+        kind,
+        text,
+        truncated,
+        paged: Some(Paged { page_count, pages_extracted, incomplete, ocr, failed_pages: native_failed }),
+        engine: Engine::Pdf,
+        timing,
     })
 }
