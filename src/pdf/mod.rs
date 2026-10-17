@@ -87,6 +87,25 @@ pub fn open(bytes: Bytes, max_pages: usize) -> Result<(PdfDocument, usize), ApiE
     Ok((doc, n))
 }
 
+/// Text-mode native read for one page: geometric row-major order with
+/// visual-order RTL lines restored against the x-verdict reference.
+/// Falls back to `extract_text` when the geometric path fails; pages
+/// without RTL text never pay for the reference read.
+fn plain_text_page(doc: &PdfDocument, idx: usize) -> Result<String, pdf_oxide::Error> {
+    let opts = ConversionOptions { extract_tables: true, ..Default::default() };
+    let plain = match doc.to_plain_text(idx, &opts) {
+        Ok(t) => t,
+        Err(_) => return doc.extract_text(idx),
+    };
+    if !pdf_oxide::text::bidi::looks_rtl(&plain) {
+        return Ok(plain);
+    }
+    match doc.extract_text(idx) {
+        Ok(reference) => Ok(crate::text::restore_rtl_lines(&plain, &reference)),
+        Err(_) => Ok(plain),
+    }
+}
+
 /// Validates a 1-based page selection against the page count.
 pub fn select_pages(sel: Option<&[usize]>, page_count: usize) -> Result<Vec<usize>, ApiError> {
     match sel {
@@ -157,7 +176,12 @@ pub fn phase1(bytes: Bytes, job: &PdfJob) -> Result<Phase1, ApiError> {
         let mut plan = route::plan_page(job.ocr, class.map(|c| c.kind), legacy);
         let native = match &md_opts {
             Some(opts) => doc.to_markdown(idx, opts),
-            None => doc.extract_text(idx),
+            // Plain-text reading order (structure tree for tagged PDFs,
+            // XY-cut row-major for untagged ones) keeps side-by-side
+            // columns on shared lines, so `Invoice No. GST-3425-26` stays
+            // together for `/v1/extract/fields`. `extract_text` assembles
+            // tables in content-stream order instead, which splits them.
+            None => plain_text_page(&doc, idx),
         };
         let (mut text, failed) = match native {
             Ok(t) => (t, false),

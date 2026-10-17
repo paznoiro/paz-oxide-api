@@ -27,6 +27,81 @@ pub fn normalize_arabic_forms(s: String) -> String {
     out
 }
 
+/// Restores logical order to RTL lines that the geometric plain-text
+/// pipeline emits in visual order, using `reference` — the same page
+/// through `extract_text`, whose per-run x-verdicts keep it RTL-correct —
+/// as the oracle.
+///
+/// A line is only changed when its corrected form is fully attested by
+/// reference lines, so LTR pages, already-correct lines, and unattested
+/// lines come back byte-identical. The geometric path may also group
+/// spans differently (two reference lines on one output line), so the
+/// corrected line may match several reference lines pieced together —
+/// in which case their order is restored to the output line's own.
+/// Pure-RTL lines use the same number-preserving reversal the reference
+/// path uses; mixed lines (Latin labels beside RTL values) go through
+/// the full UAX #9 reorder.
+pub fn restore_rtl_lines(text: &str, reference: &str) -> String {
+    use pdf_oxide::text::bidi::{looks_rtl, reorder_visual_to_logical, reverse_rtl_keep_numbers};
+    use std::collections::HashSet;
+    if !looks_rtl(text) {
+        return text.to_string();
+    }
+    let key = |l: &str| l.split_whitespace().collect::<Vec<_>>().join(" ");
+    let known: HashSet<String> = reference.lines().map(&key).collect();
+    // Split a corrected line into reference lines, longest pieces first.
+    // Returns the pieces in the corrected line's order, if fully covered.
+    let partition = |corrected: &str| -> Option<Vec<String>> {
+        let words: Vec<&str> = corrected.split_whitespace().collect();
+        let n = words.len();
+        if n == 0 {
+            return None;
+        }
+        let mut parent: Vec<Option<usize>> = vec![None; n + 1];
+        parent[0] = Some(0);
+        for j in 1..=n {
+            for i in (0..j).rev() {
+                if parent[i].is_some() && known.contains(words[i..j].join(" ").as_str()) {
+                    parent[j] = Some(i);
+                    break;
+                }
+            }
+        }
+        parent[n]?;
+        let mut pieces = Vec::new();
+        let mut j = n;
+        while j > 0 {
+            let i = parent[j].unwrap();
+            pieces.push(words[i..j].join(" "));
+            j = i;
+        }
+        pieces.reverse();
+        Some(pieces)
+    };
+    let mut out = String::with_capacity(text.len());
+    for (n, line) in text.split('\n').enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        if looks_rtl(line) && !known.contains(key(line).as_str()) {
+            let corrected = if line.chars().any(|c| c.is_ascii_alphabetic()) {
+                reorder_visual_to_logical(line)
+            } else {
+                reverse_rtl_keep_numbers(line)
+            };
+            if let Some(mut pieces) = partition(&corrected) {
+                // The correction mirrors the output line, so its pieces run
+                // backwards against the output order: flip them back.
+                pieces.reverse();
+                out.push_str(&pieces.join(" "));
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ScriptCounts {
     pub latin: usize,
@@ -244,6 +319,30 @@ pub fn merge_native_and_ocr(native: &str, ocr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtl_lines_restored_only_with_oracle_support() {
+        let reference = "مرحبا بالعالم\nPure LTR";
+        // Visual-order line, as the geometric pipeline emits it.
+        let visual = "ملاعلاب ابحرم\nPure LTR";
+        assert_eq!(restore_rtl_lines(visual, reference), reference);
+        // Already-logical lines are in the reference: untouched.
+        assert_eq!(restore_rtl_lines(reference, reference), reference);
+        // No RTL at all: fast path, no allocation surprises.
+        assert_eq!(restore_rtl_lines("Hello", reference), "Hello");
+        // Oracle has no support: keep, never guess.
+        assert_eq!(restore_rtl_lines(visual, "unrelated"), visual);
+        // The geometric path may group two reference lines onto one output
+        // line: the correction pieces them back apart, in output order.
+        let merged_visual = "ةيبرع ةقيثو ملاعلاب ابحرم";
+        assert_eq!(
+            restore_rtl_lines(merged_visual, "وثيقة عربية\nمرحبا بالعالم"),
+            "وثيقة عربية مرحبا بالعالم"
+        );
+        // Mixed line present in the reference: untouched.
+        let mixed = "Total 2024 الإجمالي";
+        assert_eq!(restore_rtl_lines(mixed, mixed), mixed);
+    }
 
     #[test]
     fn arabic_presentation_forms_become_base_letters() {
