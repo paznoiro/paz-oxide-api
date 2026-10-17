@@ -26,7 +26,7 @@ env_file_key() {
 }
 
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/paznoiro/paz-oxide-api}"
-IMAGE_TAG="${IMAGE_TAG:-0.2.1}"
+IMAGE_TAG="${IMAGE_TAG:-0.3.0}"
 OXIDE_API_PORT="${OXIDE_API_PORT:-8080}"
 ENV_FILE="${ZAP_ENV_FILE:-.oxide-local.env}"
 OXIDE_API_API_KEY="${OXIDE_API_API_KEY:-$(dotenv_key)}"

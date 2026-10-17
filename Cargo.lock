@@ -1443,7 +1443,7 @@ checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
 
 [[package]]
 name = "oxide-api"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64 0.22.1",

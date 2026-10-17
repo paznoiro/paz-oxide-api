@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Oxide API",
-    "version": "0.2.1",
+    "version": "0.3.0",
     "summary": "Text and markdown extraction from PDF, Office, OpenDocument and image files, with OCR.",
     "description": "One HTTP API that extracts `text` and `markdown` from **PDF**, **Office** (DOCX, XLSX, PPTX,\nDOC, XLS, PPT), **OpenDocument** (ODT, ODS, ODP) and **image** files (PNG, JPEG, TIFF, WebP,\nGIF, BMP, JPEG 2000, PNM, TGA). The file type is detected from the content, so one route\nserves every format.\n\nPDF pages are classified one by one: pages with a usable text layer are extracted natively,\nand scanned or legacy-font pages go through OCR (English, Hindi, Arabic) in the same request.\nImages go straight to OCR, one page per TIFF page; EXIF orientation is honoured. HEIC, AVIF\nand JPEG XL are recognized but not supported.\n\n**Input.** Send the document as multipart (`file=<binary>`), as JSON\n(`{\"file_base64\": \"...\"}`), or as the raw request body. Parameters are top-level multipart\nparts, JSON keys, or query parameters; body parameters override query parameters. Parameters\nthat don't apply to the detected document kind are ignored and listed in `ignored_params`.\n\n**Output.** JSON by default. `Accept: text/plain` (text endpoint) or `Accept: text/markdown`\n(markdown endpoint) returns the raw text, with metadata in `X-Oxide-*` headers.\n\n**Fields.** `/v1/extract/fields` reads the document exactly as the text endpoint does, then\nruns a list of named regular-expression fields over that one text and returns each value (or\n`null`). Its `fields` (and `text`) are taken whole, the one exception to \"never nested\".\n\n**Limits.** 32 MiB request body (for JSON this counts the base64 text). 8 requests are\nprocessed at once per container; others wait up to 1 s for a slot, then get `429`.\nNative extraction has a 30 s deadline, requests that OCR any page 120 s, both measured from\nadmission. A PDF or image that runs out of time returns the pages done so far with\n`incomplete: true`. Images are limited to 64 megapixels per page.\n\nErrors use RFC 9457 `application/problem+json`.\n",
     "license": {
@@ -930,7 +930,7 @@
     },
     "headers": {
       "X-Engine": {
-        "description": "Engine and version: `pdf_oxide/0.3.78` (PDFs, and image OCR), `office_oxide/0.1.13`\n(DOCX/XLSX/PPTX/DOC/XLS/PPT) or `oxide-api/0.2.1` (OpenDocument, image info).\n",
+        "description": "Engine and version: `pdf_oxide/0.3.78` (PDFs, and image OCR), `office_oxide/0.1.13`\n(DOCX/XLSX/PPTX/DOC/XLS/PPT) or `oxide-api/0.3.0` (OpenDocument, image info).\n",
         "schema": {
           "type": "string"
         }
