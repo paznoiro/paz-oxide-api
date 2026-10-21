@@ -73,6 +73,28 @@ jobs:
           docker run -d --name oxide -p 8080:8080 -e OXIDE_API_API_KEY oxide-api:ci
           ./scripts/smoke.sh
           curl -fsS http://localhost:8080/version | python3 -c 'import json,os,sys; assert json.load(sys.stdin)["version"] == os.environ["VERSION"]'
+      - name: Verify container request logs
+        run: |
+          docker logs oxide > /tmp/oxide.log 2>&1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          output = Path('/tmp/oxide.log').read_text()
+          events = []
+          for line in output.splitlines():
+              try:
+                  events.append(json.loads(line))
+              except json.JSONDecodeError:
+                  pass  # ONNX Runtime can write its own startup diagnostics.
+          requests = [e for e in events if e.get('span', {}).get('name') == 'request']
+          assert requests, 'no structured request logs'
+          assert not any(e['span']['path'] == '/healthz' for e in requests), 'health probe logged'
+          assert all(e['span'].get('request_id') for e in requests), 'missing request ID'
+          assert any(e['level'] == 'INFO' and e['fields'].get('status') == 200 for e in requests)
+          assert any(e['level'] == 'WARN' and e['fields'].get('problem') == 'unauthorized' for e in requests)
+          assert 'ci-key-0123456789abcdef' not in output, 'API key appeared in logs'
+          print(f'Validated {len(requests)} structured request logs; no health probes or API keys logged')
+          PY
       - name: Build and push multi-arch image
         id: push
         uses: docker/build-push-action@v6
