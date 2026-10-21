@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Oxide API
-  version: 0.3.0
-  summary: Text and markdown extraction from PDF, Office, OpenDocument and image files, with OCR.
+  version: 0.3.1
+  summary: Text, markdown and structured PDF extraction, with OCR.
   description: |
     One HTTP API that extracts `text` and `markdown` from **PDF**, **Office** (DOCX, XLSX, PPTX,
     DOC, XLS, PPT), **OpenDocument** (ODT, ODS, ODP) and **image** files (PNG, JPEG, TIFF, WebP,
@@ -21,6 +21,11 @@ info:
 
     **Output.** JSON by default. `Accept: text/plain` (text endpoint) or `Accept: text/markdown`
     (markdown endpoint) returns the raw text, with metadata in `X-Oxide-*` headers.
+
+    **Structured PDF.** `/v1/extract/document` returns page text and ordered, positioned blocks
+    for digital, scanned and mixed PDFs. Native font details and OCR recognizer confidence are
+    retained; unavailable confidence is null. This is input for downstream LLM schema mapping;
+    the service does not call an LLM or accept a target JSON schema.
 
     **Fields.** `/v1/extract/fields` reads the document exactly as the text endpoint does, then
     runs a list of named regular-expression fields over that one text and returns each value (or
@@ -87,6 +92,59 @@ paths:
               schema:
                 type: string
               description: Raw text; metadata in `X-Oxide-*` headers.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '408': { $ref: '#/components/responses/UploadTimeout' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '503': { $ref: '#/components/responses/Draining' }
+  /v1/extract/document:
+    post:
+      tags: [extract]
+      operationId: extractDocument
+      summary: Extract structured PDF content for downstream schema mapping
+      description: |
+        PDF only; digital, scanned and mixed pages share the text endpoint's classification,
+        language resolution, OCR workers, admission, limits and error handling. Always JSON,
+        including with Accept: text/plain. No LLM calls or schema mapping are performed.
+
+        Native pages use PDF-Oxide positioned spans in its Structure reading order (geometric
+        column order with tagged table ordering where supported). OCR pages are rendered once
+        and reuse the existing recognizers, preserving detected text regions and recognition
+        confidence. Mixed pages retain native text, discard duplicate OCR regions using the
+        text endpoint's line comparison, and sort the combined blocks geometrically.
+        Reading order and heading roles are best effort; this is not table-cell reconstruction.
+
+        All boxes use points in the visible page after CropBox clipping and Rotate, with origin
+        at top-left, x right and y down. `page.text` is the blocks joined with newlines.
+        `char_count` sums page text Unicode scalar counts. The text budget counts that text
+        once, including separators, and can shorten the final block (its box still bounds the
+        original region). Pages omitted by a deadline or budget are absent from pages_extracted.
+        `incomplete` means deadline; `truncated` means budget. Empty pages remain present.
+
+        Confidence is null for native text (including an existing scanner OCR layer) and when
+        unavailable; it is never a general extraction quality score. For OCR it is the engine
+        recognition score in [0,1], character-weighted when the existing recognizer splits a
+        region into words. No synthetic page or document confidence is calculated.
+      parameters:
+        - $ref: '#/components/parameters/format'
+        - $ref: '#/components/parameters/pages'
+        - $ref: '#/components/parameters/ocr'
+        - $ref: '#/components/parameters/lang'
+        - $ref: '#/components/parameters/clean'
+        - $ref: '#/components/parameters/filename'
+      requestBody:
+        $ref: '#/components/requestBodies/Document'
+      responses:
+        '200':
+          description: Structured pages; check incomplete, truncated and OCR availability before mapping.
+          headers:
+            X-Engine: { $ref: '#/components/headers/X-Engine' }
+            Server-Timing: { $ref: '#/components/headers/Server-Timing' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentExtraction' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '408': { $ref: '#/components/responses/UploadTimeout' }
@@ -569,7 +627,7 @@ components:
     X-Engine:
       description: |
         Engine and version: `pdf_oxide/0.3.78` (PDFs, and image OCR), `office_oxide/0.1.13`
-        (DOCX/XLSX/PPTX/DOC/XLS/PPT) or `oxide-api/0.3.0` (OpenDocument, image info).
+        (DOCX/XLSX/PPTX/DOC/XLS/PPT) or `oxide-api/0.3.1` (OpenDocument, image info).
       schema: { type: string }
     Server-Timing:
       description: '`queue`, `parse`, `extract` and (when OCR ran) `ocr` durations in ms.'
@@ -622,6 +680,88 @@ components:
       type: string
       enum: [sniff, param, filename]
       description: How the format was determined.
+    DocumentExtraction:
+      type: object
+      required: [schema_version, kind, format, format_source, coordinate_system, char_count, truncated, page_count, pages_extracted, incomplete, ocr, pages]
+      properties:
+        schema_version: { type: string, const: '1.0' }
+        kind: { type: string, const: pdf }
+        format: { type: string, const: pdf }
+        format_source: { $ref: '#/components/schemas/FormatSource' }
+        coordinate_system:
+          type: object
+          required: [unit, origin, x_direction, y_direction]
+          properties:
+            unit: { type: string, const: pt }
+            origin: { type: string, const: top_left }
+            x_direction: { type: string, const: right }
+            y_direction: { type: string, const: down }
+        char_count: { type: integer, minimum: 0, description: Sum of Unicode scalar values in page text. }
+        truncated: { type: boolean }
+        page_count: { type: integer, minimum: 0 }
+        pages_extracted:
+          type: array
+          items: { type: integer, minimum: 1 }
+        incomplete: { type: boolean }
+        ocr: { $ref: '#/components/schemas/OcrInfo' }
+        failed_pages:
+          type: array
+          items: { type: integer, minimum: 1 }
+        pages:
+          type: array
+          items: { $ref: '#/components/schemas/DocumentPage' }
+        ignored_params:
+          type: array
+          items: { type: string }
+    DocumentPage:
+      type: object
+      required: [page, width, height, rotation, text, blocks, truncated]
+      properties:
+        page: { type: integer, minimum: 1, description: Original 1-based page number. }
+        width: { type: number, exclusiveMinimum: 0, description: Visible rotated page width in points. }
+        height: { type: number, exclusiveMinimum: 0, description: Visible rotated page height in points. }
+        rotation: { type: integer, description: Original page rotation in degrees, already applied to boxes. }
+        text: { type: string, description: Ordered block text joined with newlines. }
+        blocks:
+          type: array
+          items: { $ref: '#/components/schemas/DocumentBlock' }
+        truncated: { type: boolean, description: This page lost text to the document budget. }
+    DocumentBlock:
+      type: object
+      required: [id, reading_order, kind, text, bbox, source, confidence]
+      properties:
+        id: { type: string, description: 'Page-scoped citation ID, e.g. p1-b0; deterministic for the same extraction, not a persistent document ID.' }
+        reading_order: { type: integer, minimum: 0, description: Zero-based position in this page's blocks array. }
+        kind: { type: string, enum: [text, heading, header, footer, page_number, artifact] }
+        text: { type: string }
+        bbox:
+          oneOf:
+            - $ref: '#/components/schemas/DocumentBox'
+            - type: 'null'
+          description: Axis-aligned region in displayed page points; null when source geometry is unavailable.
+        source: { type: string, enum: [native, ocr] }
+        confidence:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: OCR recognition confidence only; null for native text or unavailable scores. Word-split regions use character-weighted engine scores.
+        heading_level: { type: integer, minimum: 1, maximum: 6 }
+        font:
+          type: object
+          required: [name, size, bold, italic]
+          properties:
+            name: { type: string }
+            size: { type: number, description: Native font size in PDF points. }
+            bold: { type: boolean }
+            italic: { type: boolean }
+    DocumentBox:
+      type: object
+      required: [x, y, width, height]
+      properties:
+        x: { type: number, minimum: 0 }
+        y: { type: number, minimum: 0 }
+        width: { type: number, exclusiveMinimum: 0 }
+        height: { type: number, exclusiveMinimum: 0 }
     PdfExtraction:
       type: object
       required: [kind, format, format_source, text, char_count, truncated, page_count, pages_extracted, incomplete, ocr]

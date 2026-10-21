@@ -1,82 +1,78 @@
-# Release → multi-arch image on GHCR.
-#
-# Whenever a GitHub Release is published (e.g. `gh release create v0.1.0`),
-# this builds linux/amd64 + linux/arm64 and pushes to GHCR, then appends the
-# `docker pull` commands + package link to the release body ("binaries").
-#
-# All RUN stages of the Dockerfile execute on $BUILDPLATFORM and only the
-# final stage is per-arch (COPY-only), so one ubuntu runner cross-compiles
-# both arches with no emulation and no ARM runner needed.
-#
-# Tags for release vX.Y.Z (non-prerelease): X.Y.Z, X.Y, X, latest.
-# Prereleases get X.Y.Z only (no `latest` float).
 name: release-docker
+run-name: Build and publish main (${{ github.sha }})
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Existing tag to (re)build, e.g. v0.1.0 (manual re-run only)"
-        required: false
-        type: string
+
+# Keep every push queued, including pushes arriving while another is pending.
+# Serialize version allocation and publication so latest cannot move backwards.
+# https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+concurrency:
+  group: ghcr-main
+  cancel-in-progress: false
+  queue: max
 
 permissions:
-  contents: write      # append GHCR pull info to the release body
-  packages: write      # push to ghcr.io
-  id-token: write      # keyless provenance attestation
-  attestations: write  # actions/attest-build-provenance
-
-env:
-  CARGO_TERM_COLOR: always
+  contents: read
 
 jobs:
-  docker:
+  version:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     outputs:
-      image: ${{ steps.meta.outputs.tags }}
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - name: Resolve version
+      - name: Reserve next patch version (reuse on retry)
         id: version
-        run: |
-          ref="${{ github.event.inputs.tag || github.ref_name }}"
-          v="${ref#v}"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "Building version: $v (from ref: $ref)"
+        run: python3 scripts/release_version.py --reserve
 
-      - uses: docker/setup-qemu-action@v3
+  checks:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  docker:
+    needs: [version, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stamp binary and OpenAPI version
+        run: python3 scripts/release_version.py --set "$VERSION"
       - uses: docker/setup-buildx-action@v3
-
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker metadata (tags + OCI labels)
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Build amd64 image for smoke tests
+        uses: docker/build-push-action@v6
         with:
-          images: ghcr.io/${{ github.repository_owner }}/paz-oxide-api
-          flavor: |
-            latest=false
-          tags: |
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
-            type=semver,pattern={{major}},value=${{ steps.version.outputs.version }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
-            type=sha,prefix=,suffix=-${{ github.ref_name }},format=short
-          labels: |
-            org.opencontainers.image.title=oxide-api
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: oxide-api:ci
+          build-args: VERSION=${{ env.VERSION }}
+          cache-from: type=gha
+      - name: Smoke test image before publishing
+        env:
+          OXIDE_API_API_KEY: ci-key-0123456789abcdef
+        run: |
+          docker run -d --name oxide -p 8080:8080 -e OXIDE_API_API_KEY oxide-api:ci
+          ./scripts/smoke.sh
+          curl -fsS http://localhost:8080/version | python3 -c 'import json,os,sys; assert json.load(sys.stdin)["version"] == os.environ["VERSION"]'
       - name: Build and push multi-arch image
         id: push
         uses: docker/build-push-action@v6
@@ -84,42 +80,33 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          build-args: VERSION=${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
           provenance: true
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/paz-oxide-api
+          subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
-
-  release-notes:
-    # Manual re-runs (workflow_dispatch) only rebuild the image; release notes
-    # are touched solely for real published releases (avoids creating a
-    # release as a side effect when none exists for the tag).
-    if: github.event_name == 'release'
-    needs: [docker]
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Append GHCR pull info to the release body
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          append_body: true
-          body: |
-            ## Container image (GHCR)
-
-            Multi-arch (`linux/amd64`, `linux/arm64`), published by the `release-docker` workflow:
-
-            ```sh
-            docker pull ghcr.io/${{ github.repository_owner }}/paz-oxide-api:${{ needs.docker.outputs.version }}
-            docker run -p 8080:8080 -e OXIDE_API_API_KEY=<your-key> --read-only ghcr.io/${{ github.repository_owner }}/paz-oxide-api:${{ needs.docker.outputs.version }}
-            ```
-
-            Also tagged `:latest` (stable releases only).
-            Package page: ${{ github.server_url }}/${{ github.repository }}/pkgs/container/paz-oxide-api
+      - name: Published image
+        run: |
+          {
+            echo "### Published to GHCR"
+            echo "Version: \`$VERSION\`"
+            echo "Platforms: \`linux/amd64\`, \`linux/arm64\`"
+            echo "\`docker pull $IMAGE:$VERSION\`"
+            echo "Digest: \`${{ steps.push.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Container logs
+        if: failure()
+        run: docker logs oxide 2>&1 || true

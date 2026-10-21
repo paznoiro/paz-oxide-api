@@ -3,10 +3,12 @@
 
 use image::DynamicImage;
 use pdf_oxide::PdfDocument;
+use pdf_oxide::geometry::Rect;
 use pdf_oxide::ocr::{DetectedBox, crop_text_region};
 use pdf_oxide::rendering::{RenderOptions, render_page};
 
 use super::stack::OcrStack;
+use crate::pdf::document::Block;
 use crate::pdf::lang::Lang;
 use crate::text::ScriptCounts;
 
@@ -349,7 +351,23 @@ pub fn detect(stack: &OcrStack, img: &DynamicImage) -> Result<Vec<DetectedBox>, 
 pub struct PageOcr {
     pub text: String,
     pub lang: Lang,
-    pub spans: usize,
+    /// In OCR image pixels until a structured PDF job maps them to points.
+    pub blocks: Vec<Block>,
+}
+
+fn page_ocr(spans: Vec<Span>, lang: Lang) -> PageOcr {
+    let (text, spans) = assemble_ordered(spans, lang == Lang::Ar);
+    let blocks = spans
+        .into_iter()
+        .map(|s| {
+            Block::ocr(
+                s.text,
+                Rect::new(s.min_x, s.min_y, s.max_x - s.min_x, s.max_y - s.min_y),
+                s.confidence,
+            )
+        })
+        .collect();
+    PageOcr { text, lang, blocks }
 }
 
 /// OCR one image with a fixed language.
@@ -357,7 +375,7 @@ pub fn ocr_image(stack: &OcrStack, img: &DynamicImage, lang: Lang) -> Result<Pag
     let boxes = detect(stack, img)?;
     let spans = recognize_boxes(stack, img, &boxes, lang)?;
     tracing::debug!(boxes = boxes.len(), spans = spans.len(), chars = spans.iter().map(|s| s.text.len()).sum::<usize>(), lang = lang.code(), "ocr fixed");
-    Ok(PageOcr { spans: spans.len(), text: assemble(spans, lang == Lang::Ar), lang })
+    Ok(page_ocr(spans, lang))
 }
 
 /// Language probe: detect once, recognize the 8 largest boxes with every
@@ -399,14 +417,18 @@ pub fn probe_and_ocr(stack: &OcrStack, img: &DynamicImage, candidates: &[Lang]) 
     };
     let spans = recognize_boxes(stack, img, &boxes, lang)?;
     tracing::debug!(boxes = boxes.len(), spans = spans.len(), lang = lang.code(), probed, "ocr probe done");
-    Ok((PageOcr { spans: spans.len(), text: assemble(spans, lang == Lang::Ar), lang }, probed))
+    Ok((page_ocr(spans, lang), probed))
 }
 
 /// Groups spans into lines (vertical overlap), orders words within a line
 /// (right-to-left for Arabic), and inserts paragraph breaks at large gaps.
-pub fn assemble(mut spans: Vec<Span>, rtl: bool) -> String {
+pub fn assemble(spans: Vec<Span>, rtl: bool) -> String {
+    assemble_ordered(spans, rtl).0
+}
+
+fn assemble_ordered(mut spans: Vec<Span>, rtl: bool) -> (String, Vec<Span>) {
     if spans.is_empty() {
-        return String::new();
+        return (String::new(), Vec::new());
     }
     spans.sort_by(|a, b| a.cy().total_cmp(&b.cy()));
     let mut lines: Vec<Vec<Span>> = Vec::new();
@@ -425,6 +447,7 @@ pub fn assemble(mut spans: Vec<Span>, rtl: bool) -> String {
     let median_h = heights[heights.len() / 2];
 
     let mut out = String::new();
+    let mut ordered = Vec::new();
     let mut prev_bottom: Option<f32> = None;
     for mut line in lines {
         if rtl {
@@ -440,8 +463,9 @@ pub fn assemble(mut spans: Vec<Span>, rtl: bool) -> String {
         let words: Vec<&str> = line.iter().map(|s| s.text.trim()).collect();
         out.push_str(&words.join(" "));
         prev_bottom = Some(bottom);
+        ordered.extend(line);
     }
-    out
+    (out, ordered)
 }
 
 fn line_metrics(line: &[Span]) -> (f32, f32) {
@@ -474,6 +498,20 @@ mod tests {
     fn rtl_line_order() {
         let spans = vec![span("A", 10.0, 10.0, 40.0, 20.0), span("B", 100.0, 10.0, 40.0, 20.0)];
         assert_eq!(assemble(spans, true), "B A");
+    }
+
+    #[test]
+    fn positioned_ocr_keeps_recognizer_scores_and_reading_order() {
+        let mut left = span("left", 10.0, 10.0, 40.0, 20.0);
+        left.confidence = 0.81;
+        let mut right = span("right", 100.0, 10.0, 40.0, 20.0);
+        right.confidence = 0.73;
+        let page = page_ocr(vec![right, left], Lang::En);
+        assert_eq!(page.text, "left right");
+        assert_eq!(page.blocks[0].text, "left");
+        assert_eq!(page.blocks[0].confidence, Some(0.81));
+        assert_eq!(page.blocks[1].confidence, Some(0.73));
+        assert_eq!(page.blocks[0].bbox, Some(Rect::new(10.0, 10.0, 40.0, 20.0)));
     }
 
     #[test]

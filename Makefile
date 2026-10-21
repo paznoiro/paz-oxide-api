@@ -1,5 +1,6 @@
 # Everything runs in containers; no local Rust toolchain needed.
 RUST_IMAGE ?= rust:1-bookworm
+VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
 DOCKER_RUST = docker run --rm -v $(CURDIR):/work -v oxide-cargo-registry:/usr/local/cargo/registry -w /work $(RUST_IMAGE)
 
 .PHONY: test lint smoke image fixtures openapi up down
@@ -16,7 +17,7 @@ lint:
 	  cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --no-default-features -- -D warnings'
 
 image:
-	docker build -t paz-oxide-api:latest -t paz-oxide-api:0.3.0 .
+	docker build --build-arg VERSION=$(VERSION) -t paz-oxide-api:latest -t paz-oxide-api:$(VERSION) .
 
 fixtures:
 	./scripts/gen_fixtures.sh

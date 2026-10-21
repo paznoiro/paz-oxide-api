@@ -16,6 +16,7 @@ use super::{page, smoke, stack};
 use crate::admission::JobPermit;
 use crate::blocking::{WORKER_STACK, Watchdog};
 use crate::pdf::PageSource;
+use crate::pdf::document::{Block, PageFrame};
 use crate::pdf::lang::Lang;
 
 pub enum LangPlan {
@@ -30,6 +31,8 @@ pub struct OcrJob {
     pub render: bool,
     /// PDF only: a small embedded image (a stamp) is the target.
     pub accept_small_image: bool,
+    /// Full-page rendering and positioned results for document extraction.
+    pub structured: bool,
     pub lang: LangPlan,
     pub permit: JobPermit,
     pub reply: oneshot::Sender<Result<OcrPageResult, String>>,
@@ -37,6 +40,7 @@ pub struct OcrJob {
 
 pub struct OcrPageResult {
     pub text: String,
+    pub blocks: Vec<Block>,
     pub lang: Lang,
     /// The language was chosen by the probe on this page.
     pub probed: bool,
@@ -271,7 +275,9 @@ fn worker(
             .increment(1);
         metrics::histogram!("oxide_ocr_page_duration_seconds", "lang" => lang_label).record(elapsed.as_secs_f64());
         let OcrJob { reply, permit, .. } = job;
-        let _ = reply.send(out.map(|(p, probed)| OcrPageResult { text: p.text, lang: p.lang, probed, elapsed }));
+        let _ = reply.send(out.map(|(p, probed)| OcrPageResult {
+            text: p.text, blocks: if job.structured { p.blocks } else { Vec::new() }, lang: p.lang, probed, elapsed,
+        }));
         drop(permit);
     }
 }
@@ -281,6 +287,19 @@ fn run_job(stack: &stack::OcrStack, job: &OcrJob) -> Result<(page::PageOcr, bool
         PageSource::Image(img) => return ocr_one(stack, &img.decode(job.page)?, &job.lang),
         PageSource::Pdf(doc) => doc,
     };
+    if job.structured {
+        // Render once to include every image and to give native/OCR blocks
+        // the same cropped, rotated page coordinate system. Reuse the same
+        // detector, recognizers and language probe as plain-text extraction.
+        let frame =
+            PageFrame::read(doc, job.page).map_err(|e| format!("page geometry failed: {e}"))?;
+        let img = page::rendered_image(doc, job.page)?;
+        let (mut out, probed) = ocr_one(stack, &img, &job.lang)?;
+        for block in &mut out.blocks {
+            block.bbox = block.bbox.and_then(|b| frame.ocr_box(b, img.width(), img.height()));
+        }
+        return Ok((out, probed));
+    }
     // Legacy-font pages are vector text: there is no scan to try, render only.
     if job.render {
         let img = page::rendered_image(doc, job.page)?;
@@ -342,7 +361,7 @@ fn run_job(stack: &stack::OcrStack, job: &OcrJob) -> Result<(page::PageOcr, bool
             merged_chars = merged_text.chars().count(),
             "merged embedded + rendered OCR"
         );
-        let merged = page::PageOcr { text: merged_text, lang: base.0.lang, spans: base.0.spans + extra.0.spans };
+        let merged = page::PageOcr { text: merged_text, lang: base.0.lang, blocks: Vec::new() };
         return Ok((merged, base.1 || extra.1));
     }
     let img = page::rendered_image(doc, job.page)?;

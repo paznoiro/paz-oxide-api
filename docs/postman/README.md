@@ -20,6 +20,7 @@ use `noauth`.
 | Folder | Requests |
 |---|---|
 | `extract` | every endpoint (`text`, `markdown`, `fields`, `info`) in each input style: multipart, JSON base64, raw body with `Accept: text/plain` / `text/markdown`. Any supported file works: the type is detected from the content |
+| `documents (structured)` | digital, scanned and mixed PDF pages to structured JSON; fixture requests run as-is |
 | `images (OCR)` | an image to text, a sideways phone photo (EXIF rotation), page 2 of a multi-page TIFF, raw markdown from an Arabic WebP, image info |
 | `opendocument` | ODT / ODS / ODP to markdown, spreadsheet info |
 | `ops` | health, readiness, version, metrics, OpenAPI |
@@ -35,7 +36,7 @@ For multipart requests, pick a file for the `file` key; for binary
 requests (Body → Binary), pick the file there. The `extract` requests
 start empty.
 
-The `images (OCR)` and `opendocument` requests point at the repo's test
+The `documents (structured)`, `images (OCR)` and `opendocument` requests point at the repo's test
 fixtures (`tests/fixtures/scan_en.png`, `sample.ods`, ...). Set Postman's
 working directory to the repo root (Settings → General → Working
 directory) and they run as-is.

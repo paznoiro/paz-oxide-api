@@ -1,4 +1,4 @@
-//! `/v1/extract/{text,markdown,fields}`: phase 1 (native, CPU pool) + phase 2
+//! `/v1/extract/{text,markdown,fields,document}`: phase 1 (native, CPU pool) + phase 2
 //! (OCR pool) orchestration. Images take the PDF path with every page
 //! routed to OCR. `fields` reads the document exactly as `text` does, then
 //! runs its field specs over that one text.
@@ -20,6 +20,7 @@ use crate::error::ApiError;
 use crate::fields::{self, Extracted, Field, FieldValues};
 use crate::io::{self, Params, Shape};
 use crate::office::OfficeFormat;
+use crate::pdf::document::{Block, DocumentPage};
 use crate::pdf::lang::{Lang, LangParam, LangSource};
 use crate::pdf::route::{OcrMode, OcrReason};
 use crate::pdf::{self, Mode, Phase1};
@@ -35,12 +36,13 @@ enum Endpoint {
     Text,
     Markdown,
     Fields,
+    Document,
 }
 
 impl Endpoint {
     fn raw_type(self) -> &'static str {
         match self {
-            Endpoint::Text | Endpoint::Fields => "text/plain",
+            Endpoint::Text | Endpoint::Fields | Endpoint::Document => "text/plain",
             Endpoint::Markdown => "text/markdown",
         }
     }
@@ -58,6 +60,10 @@ pub async fn fields(State(st): State<Arc<AppState>>, req: Request) -> Response {
     extract_fields(st, req).await.unwrap_or_else(IntoResponse::into_response)
 }
 
+pub async fn document(State(st): State<Arc<AppState>>, req: Request) -> Response {
+    extract(st, req, Endpoint::Document).await.unwrap_or_else(IntoResponse::into_response)
+}
+
 struct ExtractParams {
     format: Option<DocKind>,
     pages: Option<Vec<usize>>,
@@ -67,6 +73,7 @@ struct ExtractParams {
     clean: bool,
     include_text: bool,
     provided: Vec<String>,
+    structured: bool,
 }
 
 /// Params for paged kinds (PDF, images).
@@ -98,9 +105,9 @@ impl ExtractParams {
         let clean = p.get("clean").map(|v| parse_bool("clean", v)).transpose()?.unwrap_or(false);
         let include_text = match ep {
             Endpoint::Fields => p.get("include_text").map(|v| parse_bool("include_text", v)).transpose()?.unwrap_or(false),
-            Endpoint::Text | Endpoint::Markdown => false,
+            Endpoint::Text | Endpoint::Markdown | Endpoint::Document => false,
         };
-        Ok(Self { format: format_param(p)?, pages, ocr, lang, detect_headings, clean, include_text, provided: p.keys().cloned().collect() })
+        Ok(Self { format: format_param(p)?, pages, ocr, lang, detect_headings, clean, include_text, provided: p.keys().cloned().collect(), structured: ep == Endpoint::Document })
     }
 
     /// Params that don't apply to the detected kind (or aren't known at all).
@@ -135,15 +142,24 @@ async fn extract(st: Arc<AppState>, mut req: Request, ep: Endpoint) -> Result<Re
         .map_err(|_| ApiError::body_timeout())??;
     let params = ExtractParams::parse(&input.params, ep)?;
     let detected = detect::detect(&input.bytes, params.format, input.filename.as_deref())?;
+    if ep == Endpoint::Document && detected.kind != DocKind::Pdf {
+        return Err(ApiError::unsupported(
+            "structured document extraction accepts PDF files; use /v1/extract/text for other formats",
+        ));
+    }
     count_document(detected.kind);
     let ignored = params.ignored(Some(detected.kind), ep);
     let mode = match ep {
-        Endpoint::Text | Endpoint::Fields => Mode::Text,
+        Endpoint::Text | Endpoint::Fields | Endpoint::Document => Mode::Text,
         Endpoint::Markdown => Mode::Markdown { detect_headings: params.detect_headings },
     };
     let ctx = Ctx { st, admitted, clean: params.clean };
     let ext = read_document(&ctx, input.bytes, detected.kind, &params, mode).await?;
-    Ok(render(ext, detected.source, output, &ignored))
+    Ok(if ep == Endpoint::Document {
+        render_document(ext, detected.source, &ignored)
+    } else {
+        render(ext, detected.source, output, &ignored)
+    })
 }
 
 fn count_document(kind: DocKind) {
@@ -166,6 +182,56 @@ struct Extraction {
     paged: Option<Paged>,
     engine: Engine,
     timing: Timing,
+    document: Option<Vec<DocumentPage>>,
+}
+
+#[derive(Serialize)]
+struct DocumentResponse<'a> {
+    schema_version: &'static str,
+    kind: &'static str,
+    format: &'static str,
+    format_source: FormatSource,
+    coordinate_system: CoordinateSystem,
+    char_count: usize,
+    truncated: bool,
+    #[serde(flatten)]
+    paged: Option<&'a Paged>,
+    pages: &'a [DocumentPage],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    ignored_params: &'a [String],
+}
+
+#[derive(Serialize)]
+struct CoordinateSystem {
+    unit: &'static str,
+    origin: &'static str,
+    x_direction: &'static str,
+    y_direction: &'static str,
+}
+
+fn render_document(ext: Extraction, source: FormatSource, ignored: &[String]) -> Response {
+    let pages = ext.document.as_deref().unwrap_or_default();
+    respond::json(
+        &DocumentResponse {
+            schema_version: "1.0",
+            kind: "pdf",
+            format: "pdf",
+            format_source: source,
+            coordinate_system: CoordinateSystem {
+                unit: "pt",
+                origin: "top_left",
+                x_direction: "right",
+                y_direction: "down",
+            },
+            char_count: pages.iter().map(|p| p.text.chars().count()).sum(),
+            truncated: ext.truncated,
+            paged: ext.paged.as_ref(),
+            pages,
+            ignored_params: ignored,
+        },
+        ext.engine,
+        &ext.timing,
+    )
 }
 
 /// What a PDF or image response adds to the text.
@@ -333,7 +399,7 @@ async fn extract_fields(st: Arc<AppState>, mut req: Request) -> Result<Response,
             count_document(detected.kind);
             let ignored = params.ignored(Some(detected.kind), Endpoint::Fields);
             let ext = read_document(&ctx, input.bytes, detected.kind, &params, Mode::Text).await?;
-            let Extraction { kind, text, truncated, paged, engine, mut timing } = ext;
+            let Extraction { kind, text, truncated, paged, engine, mut timing, .. } = ext;
             let (found, text, took) = match_fields(&ctx, fields, text).await?;
             timing.extract += took;
             let body = FieldsResponse {
@@ -395,6 +461,7 @@ async fn office_flow(ctx: &Ctx, bytes: Bytes, fmt: OfficeFormat, mode: Mode) -> 
         paged: None,
         engine: if fmt.is_odf() { Engine::Native } else { Engine::Office },
         timing: Timing { queue: ctx.admitted.queue_wait, parse, extract, ocr: None },
+        document: None,
     })
 }
 
@@ -463,6 +530,7 @@ struct OutPage {
     text: String,
     ocr_applied: bool,
     merged: bool,
+    document: Option<DocumentPage>,
 }
 
 async fn pdf_flow(ctx: &Ctx, bytes: Bytes, params: &ExtractParams, mode: Mode) -> Result<Extraction, ApiError> {
@@ -470,6 +538,7 @@ async fn pdf_flow(ctx: &Ctx, bytes: Bytes, params: &ExtractParams, mode: Mode) -
     let native_deadline = ctx.admitted.admitted_at + cfg.process_timeout;
     let job = pdf::PdfJob {
         mode,
+        structured: params.structured,
         pages: params.pages.clone(),
         ocr: params.ocr,
         max_text_chars: cfg.max_text_chars,
@@ -508,7 +577,7 @@ async fn paged_flow(ctx: &Ctx, p1: Phase1, params: &ExtractParams, kind: DocKind
         run_ocr(ctx, &p1, &needing, params.lang, strict).await?
     };
 
-    finish(ctx, p1, phase2, reasons, kind)
+    finish(ctx, p1, phase2, reasons, kind, params.structured)
 }
 
 /// Phase 2 outcome.
@@ -517,6 +586,7 @@ struct Phase2 {
     lang: Option<(Lang, LangSource)>,
     /// page index → OCR text (replacement or merge per the page's reason).
     texts: Vec<(usize, String)>,
+    blocks: std::collections::HashMap<usize, Vec<Block>>,
     failed: Vec<usize>,
     /// Why the first failed page failed (engine wording, not content).
     #[cfg_attr(not(feature = "ocr"), allow(dead_code))]
@@ -533,6 +603,7 @@ impl Phase2 {
             status_hint: Some(status),
             lang: None,
             texts: vec![],
+            blocks: Default::default(),
             failed: vec![],
             first_error: None,
             not_run: vec![],
@@ -591,6 +662,7 @@ async fn run_ocr(ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], lang_pa
             page: idx,
             render: reason.renders(),
             accept_small_image: reason == OcrReason::Hybrid,
+            structured: p1.pages.iter().any(|p| p.document.is_some()),
             lang: plan,
             permit: ctx.admitted.permit.clone(),
             reply: tx,
@@ -615,6 +687,9 @@ async fn run_ocr(ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], lang_pa
                     tracing::warn!(page = idx + 1, "OCR produced no text; keeping native text");
                     out.failed.push(idx);
                 } else {
+                    if !res.blocks.is_empty() {
+                        out.blocks.insert(idx, res.blocks);
+                    }
                     out.texts.push((idx, res.text));
                 }
             }
@@ -659,12 +734,12 @@ fn lang_source_str(s: LangSource) -> &'static str {
     }
 }
 
-fn finish(ctx: &Ctx, p1: Phase1, p2: Phase2, reasons: Vec<PageReason>, kind: DocKind) -> Result<Extraction, ApiError> {
+fn finish(ctx: &Ctx, p1: Phase1, mut p2: Phase2, reasons: Vec<PageReason>, kind: DocKind, structured: bool) -> Result<Extraction, ApiError> {
     let Phase1 { pages, page_count, incomplete: p1_incomplete, truncated: p1_truncated, parse_time, extract_time, .. } = p1;
     let mut ocr_texts: std::collections::HashMap<usize, String> = p2.texts.into_iter().collect();
     let mut out_pages: Vec<OutPage> = Vec::with_capacity(pages.len());
     let mut native_failed = Vec::new();
-    for p in pages {
+    for mut p in pages {
         if p2.timed_out.contains(&p.index) {
             continue; // not done: the caller can re-request it with `pages=`
         }
@@ -673,16 +748,25 @@ fn finish(ctx: &Ctx, p1: Phase1, p2: Phase2, reasons: Vec<PageReason>, kind: Doc
         }
         match (ocr_texts.remove(&p.index), p.ocr) {
             (Some(ocr), Some(reason)) => {
-                // OCR text has no structure beyond lines and paragraphs, so
-                // it reads the same as text or markdown.
-                let (text, merged) = if reason.merges() {
-                    (crate::text::merge_native_and_ocr(&p.text, &ocr), true)
+                if let Some(page) = &mut p.document {
+                    page.apply_ocr(
+                        p2.blocks.remove(&p.index).unwrap_or_default(),
+                        reason.merges(),
+                    );
+                }
+                let merged = reason.merges();
+                // Structured output is assembled from blocks; avoid a second
+                // merge of the same content into an unused plain-text string.
+                let text = if structured {
+                    String::new()
+                } else if merged {
+                    crate::text::merge_native_and_ocr(&p.text, &ocr)
                 } else {
-                    (ocr, false)
+                    ocr
                 };
-                out_pages.push(OutPage { index: p.index, text, ocr_applied: true, merged });
+                out_pages.push(OutPage { index: p.index, text, ocr_applied: true, merged, document: p.document });
             }
-            _ => out_pages.push(OutPage { index: p.index, text: p.text, ocr_applied: false, merged: false }),
+            _ => out_pages.push(OutPage { index: p.index, text: p.text, ocr_applied: false, merged: false, document: p.document }),
         }
     }
 
@@ -693,13 +777,30 @@ fn finish(ctx: &Ctx, p1: Phase1, p2: Phase2, reasons: Vec<PageReason>, kind: Doc
 
     let mut budget = TextBudget::new(ctx.st.cfg.max_text_chars);
     let mut text = String::new();
-    for (i, p) in out_pages.iter().enumerate() {
-        if budget.exhausted() {
-            break;
+    let mut document = structured.then(Vec::new);
+    if let Some(document) = &mut document {
+        let mut kept = 0;
+        for p in &mut out_pages {
+            if budget.exhausted() {
+                budget.truncated = true;
+                break;
+            }
+            if let Some(mut page) = p.document.take() {
+                page.finish(&mut budget, ctx.clean);
+                document.push(page);
+            }
+            kept += 1;
         }
-        let sep = if i > 0 { "\n\n" } else { "" };
-        let piece = budget.take(format!("{sep}{}", p.text.trim_end()));
-        text.push_str(&piece);
+        out_pages.truncate(kept);
+    } else {
+        for (i, p) in out_pages.iter().enumerate() {
+            if budget.exhausted() {
+                break;
+            }
+            let sep = if i > 0 { "\n\n" } else { "" };
+            let piece = budget.take(format!("{sep}{}", p.text.trim_end()));
+            text.push_str(&piece);
+        }
     }
     let text = normalize_arabic_forms(text);
     let text = if ctx.clean { collapse_whitespace(&text) } else { text };
@@ -733,5 +834,6 @@ fn finish(ctx: &Ctx, p1: Phase1, p2: Phase2, reasons: Vec<PageReason>, kind: Doc
         paged: Some(Paged { page_count, pages_extracted, incomplete, ocr, failed_pages: native_failed }),
         engine: Engine::Pdf,
         timing,
+        document,
     })
 }

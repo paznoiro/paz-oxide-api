@@ -1,11 +1,18 @@
 //! `ApiError` → RFC 9457 `application/problem+json`, plus engine error mapping.
 //!
 //! Engine error messages go to the caller (they describe the caller's own
-//! document) but never into logs: only the problem slug is logged.
+//! document) but never into logs: the request middleware logs the problem
+//! slug and static title from a response extension.
 
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value, json};
+
+#[derive(Clone)]
+pub(crate) struct ProblemLog {
+    pub slug: &'static str,
+    pub title: &'static str,
+}
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -141,11 +148,6 @@ impl std::fmt::Display for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        if self.status.is_server_error() {
-            tracing::error!(problem = self.slug, status = self.status.as_u16(), "request failed");
-        } else {
-            tracing::debug!(problem = self.slug, status = self.status.as_u16(), "request rejected");
-        }
         let mut body = json!({
             "type": format!("/problems/{}", self.slug),
             "title": self.title,
@@ -157,6 +159,7 @@ impl IntoResponse for ApiError {
         }
         let bytes = serde_json::to_vec(&body).unwrap_or_default();
         let mut resp = (self.status, bytes).into_response();
+        resp.extensions_mut().insert(ProblemLog { slug: self.slug, title: self.title });
         let h = resp.headers_mut();
         h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/problem+json"));
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

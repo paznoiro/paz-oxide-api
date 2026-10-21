@@ -443,3 +443,68 @@ async fn fields_read_from_a_scanned_pdf() {
     assert_eq!(j["fields"]["iban"], Value::Null);
     assert_eq!(j["missing_required"], json!(["iban"]));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn structured_scans_have_page_boxes_and_real_recognizer_confidence() {
+    let (app, _) = app_with(&[]).await;
+    for (file, lang, marker) in [
+        ("scan_en.pdf", "en", "Invoice 4471"),
+        ("scan_hi.pdf", "hi", "भारत"),
+        ("scan_ar.pdf", "ar", "مرحبا"),
+    ] {
+        let (status, j) = extract(&app, &format!("/v1/extract/document?lang={lang}"), file).await;
+        assert_eq!(status, StatusCode::OK, "{j}");
+        assert_eq!(j["ocr"]["status"], "ocr", "{j}");
+        let page = &j["pages"][0];
+        assert!(page["text"].as_str().unwrap().contains(marker), "{page}");
+        let blocks = page["blocks"].as_array().unwrap();
+        assert!(!blocks.is_empty());
+        for (i, block) in blocks.iter().enumerate() {
+            assert_eq!(block["source"], "ocr");
+            assert_eq!(block["reading_order"], i);
+            let confidence = block["confidence"].as_f64().expect("PaddleOCR provides recognition confidence");
+            assert!((0.0..=1.0).contains(&confidence));
+            let bbox = &block["bbox"];
+            assert!(bbox["x"].as_f64().unwrap() >= 0.0);
+            assert!(bbox["y"].as_f64().unwrap() >= 0.0);
+            assert!(bbox["x"].as_f64().unwrap() + bbox["width"].as_f64().unwrap() <= page["width"].as_f64().unwrap() + 0.1);
+            assert!(bbox["y"].as_f64().unwrap() + bbox["height"].as_f64().unwrap() <= page["height"].as_f64().unwrap() + 0.1);
+        }
+        assert_eq!(page["text"], blocks.iter().map(|b| b["text"].as_str().unwrap()).collect::<Vec<_>>().join("\n"));
+    }
+    let (status, j) = extract(&app, "/v1/extract/document?pages=1&ocr=force&lang=en", "native.pdf").await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["ocr"]["status"], "ocr");
+    assert!(j["pages"][0]["text"].as_str().unwrap().contains("page-one-alpha"), "{j}");
+    assert!(j["pages"][0]["blocks"].as_array().unwrap().iter().all(|b| b["source"] == "ocr"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn structured_mixed_pdf_reuses_native_text_and_merges_stamp_without_duplicates() {
+    let (app, _) = app_with(&[]).await;
+    let mut editor = pdf_oxide::editor::DocumentEditor::from_bytes(fixture("native.pdf")).unwrap();
+    editor.merge_from_bytes(&fixture("scan_en.pdf")).unwrap();
+    editor.merge_from_bytes(&fixture("hybrid.pdf")).unwrap();
+    let req = Request::post("/v1/extract/document?lang=en")
+        .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+        .body(Body::from(editor.save_to_bytes().unwrap())).unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(j["page_count"], 5);
+    assert_eq!(j["pages_extracted"], json!([1, 2, 3, 4, 5]));
+    assert_eq!(j["ocr"]["status"], "hybrid");
+    assert_eq!(j["ocr"]["pages"], json!([4, 5]));
+    for page in j["pages"].as_array().unwrap().iter().take(3) {
+        assert!(page["blocks"].as_array().unwrap().iter().all(|b| b["source"] == "native" && b["confidence"].is_null()));
+    }
+    assert!(j["pages"][3]["text"].as_str().unwrap().contains("Invoice 4471"));
+    let hybrid = &j["pages"][4];
+    let text = hybrid["text"].as_str().unwrap();
+    assert!(text.contains("hybrid-native"), "{text}");
+    assert!(text.contains("APPROVED BY FINANCE"), "{text}");
+    assert_eq!(text.matches("Purchase order 5521").count(), 1, "{text}");
+    let blocks = hybrid["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|b| b["source"] == "native"));
+    assert!(blocks.iter().any(|b| b["source"] == "ocr"));
+}

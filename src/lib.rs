@@ -1,5 +1,5 @@
 //! Oxide API: text and markdown extraction from PDF, Office and OpenDocument
-//! files, with OCR for scanned PDFs and images, and named fields read out of
+//! files, structured PDF content, OCR for scanned PDFs and images, and named fields read out of
 //! that text by regular expressions.
 
 pub mod admission;
@@ -11,6 +11,7 @@ pub mod error;
 pub mod fields;
 pub mod handlers;
 pub mod io;
+pub mod logging;
 pub mod metrics;
 #[cfg(feature = "ocr")]
 pub mod ocr;
@@ -37,7 +38,6 @@ use tokio::sync::Semaphore;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
-use tower_http::trace::TraceLayer;
 
 use crate::blocking::{CpuPool, Watchdog};
 use crate::config::Config;
@@ -132,6 +132,7 @@ pub fn build_router(st: Arc<AppState>) -> Router {
         .route("/v1/extract/text", post(handlers::extract::text))
         .route("/v1/extract/markdown", post(handlers::extract::markdown))
         .route("/v1/extract/fields", post(handlers::extract::fields))
+        .route("/v1/extract/document", post(handlers::extract::document))
         .route("/v1/info", post(handlers::info::info))
         // Layers run outside-in: auth first, then admission, so an
         // unauthenticated request never takes a permit.
@@ -152,17 +153,7 @@ pub fn build_router(st: Arc<AppState>) -> Router {
     v1.merge(ops)
         .layer(DefaultBodyLimit::max(st.cfg.max_body_bytes))
         .layer(axum::middleware::from_fn(metrics::track))
-        .layer(
-            TraceLayer::new_for_http()
-                // Method + path + request id only: never query strings,
-                // bodies, filenames or extracted text.
-                .make_span_with(|req: &axum::http::Request<_>| {
-                    let id = req.headers().get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or("");
-                    tracing::info_span!("request", method = %req.method(), path = %req.uri().path(), request_id = %id)
-                })
-                .on_request(())
-                .on_response(tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO)),
-        )
+        .layer(axum::middleware::from_fn(logging::requests))
         .layer(PropagateRequestIdLayer::new(x_request_id.clone()))
         .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))
         .layer(SetSensitiveRequestHeadersLayer::new([axum::http::header::AUTHORIZATION]))

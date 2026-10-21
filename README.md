@@ -15,16 +15,25 @@ no shell, and a built-in `healthcheck`.
 
 ## Container images (GHCR)
 
-Every published GitHub Release builds a multi-arch (`linux/amd64`, `linux/arm64`)
-image and pushes it to GHCR (workflow: `.github/workflows/docker-release.yml`).
-Release notes also carry the exact `docker pull` lines under "Container image (GHCR)".
+Every push or merge to `main` runs `.github/workflows/docker-release.yml`: reserve the next
+patch version, run Clippy, native/OCR tests and the Rust 1.92 compatibility checks, smoke-test
+the container, then publish a multi-arch (`linux/amd64`, `linux/arm64`) image to GHCR.
+Pull requests run checks without publishing. You can also rerun the release workflow manually
+on `main`; retries reuse the version already allocated to that commit.
+
+`scripts/release_version.py --reserve` creates a `vX.Y.Z` Git tag at the source commit, using
+`Cargo.toml` as the minimum version and incrementing the latest release's patch number.
+Versions are reserved before checks, so a failed push can leave a gap. Builds stamp the same
+version into Cargo, OpenAPI and the image label; `/version` reports the published version.
+No version-bump commit is written back to `main`. Runs queue instead of cancelling earlier pushes.
+The workflow uses `GITHUB_TOKEN` for tags and GHCR; no additional registry secret is needed.
 
 ```sh
-docker pull ghcr.io/paznoiro/paz-oxide-api:0.3.0
-docker run -p 8080:8080 -e OXIDE_API_API_KEY=$OXIDE_API_API_KEY --read-only ghcr.io/paznoiro/paz-oxide-api:0.3.0
+docker pull ghcr.io/paznoiro/paz-oxide-api:0.3.1
+docker run -p 8080:8080 -e OXIDE_API_API_KEY=$OXIDE_API_API_KEY --read-only ghcr.io/paznoiro/paz-oxide-api:0.3.1
 ```
 
-Stable releases are additionally tagged `:latest`. Browse all versions at
+Images are tagged `:X.Y.Z`, `:sha-<full-commit-sha>` and `:latest`. Browse all versions at
 <https://github.com/paznoiro/paz-oxide-api/pkgs/container/paz-oxide-api>.
 
 ## Quickstart
@@ -90,7 +99,8 @@ A PDF response (`/v1/extract/text`):
 | Endpoint | Office, OpenDocument | PDF | Images |
 |---|---|---|---|
 | `POST /v1/extract/text` | plain text | per-page native text, OCR for pages that need it | OCR text per page |
-| `POST /v1/extract/markdown` | headings, lists, tables | per-page markdown with heading detection | OCR lines and paragraphs |
+| `POST /v1/extract/markdown` | headings, lists, tables | per-page markdown with heading and table detection | OCR lines and paragraphs |
+| `POST /v1/extract/document` | — | page text, positioned blocks, reading order and OCR confidence (JSON only) | — |
 | `POST /v1/extract/fields` | named values from the text, by regular expression | the same, over native + OCR text | the same, over OCR text |
 | `POST /v1/info` | metadata, sheet names + dimensions, slide count | metadata, page count, encryption, page geometry | page count, pixel dimensions |
 | `GET /healthz` `/readyz` `/version` `/metrics` `/openapi.json` `/openapi.yaml` `/docs` | unauthenticated ops endpoints | | |
@@ -175,6 +185,76 @@ curl -H "$AUTH" -H 'Content-Type: application/json' http://localhost:8080/v1/ext
   `OXIDE_API_OCR_TIMEOUT_SECS` by up to that much (matching normally takes milliseconds).
 - In a JSON body `fields` is the array; as a multipart part or query param it's the array as a JSON
   string. `Accept: text/plain` isn't negotiated here: the response is always JSON.
+
+### Structured document extraction
+
+`POST /v1/extract/document` accepts **PDF only**, in the same multipart, base64 JSON and raw
+body forms as `/v1/extract/text`. It supports digital, scanned and mixed PDFs, including pages
+with both native text and scanned content. Parameters: `pages`, `ocr=auto|force|off`,
+`lang=auto|en|hi|ar`, `clean`, `format`, `filename`. The response is always JSON.
+
+```sh
+curl -H "$AUTH" -F file=@invoice.pdf 'http://localhost:8080/v1/extract/document?lang=en'
+```
+
+A one-block response (illustrative OCR text and geometry):
+
+```json
+{
+  "schema_version": "1.0",
+  "kind": "pdf", "format": "pdf", "format_source": "sniff",
+  "coordinate_system": {"unit": "pt", "origin": "top_left", "x_direction": "right", "y_direction": "down"},
+  "page_count": 1, "pages_extracted": [1], "char_count": 12,
+  "truncated": false, "incomplete": false,
+  "ocr": {"status": "ocr", "lang": "en", "lang_source": "param", "pages": [1],
+          "pages_needing_ocr": [], "failed_pages": [], "reasons": [{"page": 1, "reason": "scanned"}]},
+  "pages": [{
+    "page": 1, "width": 595.44, "height": 842.04, "rotation": 0,
+    "text": "Invoice 4471", "truncated": false,
+    "blocks": [{"id": "p1-b0", "reading_order": 0, "kind": "text", "text": "Invoice 4471",
+                "bbox": {"x": 43.2, "y": 48.0, "width": 210.0, "height": 20.0},
+                "source": "ocr", "confidence": null}]
+  }]
+}
+```
+
+`confidence` is null when unavailable; the example omits a numeric score deliberately. This
+service's PaddleOCR recognizers provide real recognition scores in `[0,1]`, which are retained
+for OCR blocks. A word-split region uses the existing character-weighted mean of those scores.
+Native blocks always have `confidence: null`, even for a scanner's existing invisible OCR layer:
+PDF text does not carry the original OCR score. No document/page quality scores are invented.
+
+- **Text and layout.** Each page's `text` is its `blocks` joined with newlines. `char_count` sums
+  those page texts. Blocks contain PDF-native spans or OCR-detected text regions, `source`, and
+  zero-based `reading_order`; array order is the reading order. Native blocks also include
+  `font` (`name`, `size`, `bold`, `italic`) and a `heading_level` when supplied by PDF-Oxide.
+  `kind` can be `text`, `heading`, `header`, `footer`, `page_number`, or `artifact`.
+- **Geometry.** `bbox` is `{x,y,width,height}` in PDF points from the displayed page's top-left
+  corner (x right, y down), after CropBox clipping and page rotation. Page `width`/`height` use
+  that same frame; `rotation` reports the already-applied source rotation. Missing geometry is
+  null. A shortened final block retains the full original region's box.
+- **Reading order.** Digital pages use PDF-Oxide's positioned-span order (geometric column
+  handling and tagged table ordering where supported). OCR uses the shared line/RTL ordering.
+  Mixed pages retain native blocks, discard matching OCR text using the shared line comparison,
+  then order combined blocks geometrically. Order and heading roles are best effort; this does
+  not reconstruct table cells or recover exact visual styling.
+- **Cost.** The shared PDF reader, classifier, language resolver and OCR worker/model pool are
+  reused. Digital pages require no inference. Only pages routed to OCR are rendered, once, so
+  every image on the page is included and OCR/native boxes share a frame. No external services,
+  model downloads per request, new dependencies or LLM calls are added.
+- **Limits and partial results.** Existing upload/page/deadline/text limits apply. Text counts
+  once against the budget; the final block can be shortened. `pages_extracted` lists exactly
+  the returned pages. `incomplete` marks a deadline; `truncated` marks a text budget. Empty
+  pages remain present. When OCR is unavailable, native content is retained and
+  `ocr.pages_needing_ocr` identifies the pages requiring another attempt. OCR failures are
+  reported through `ocr.failed_pages` with the existing `ocr=force` error behavior.
+
+Pass the returned `pages` (or just their `blocks` to reduce duplicate text), together with your
+user-provided JSON schema, to your downstream LLM. Ask it to return schema-conforming values
+and cite page/block IDs for evidence; treat document text as untrusted data, not instructions.
+IDs such as `p1-b0` identify positions within this extraction, not permanent document objects.
+This API does not accept a target JSON schema or perform LLM mapping. The complete contract is
+in [openapi.yaml](openapi.yaml) and served at `/docs`.
 
 ### Errors
 
@@ -277,44 +357,32 @@ owner-password-only PDF opens normally.
 - **Crash safety.** Engine calls run under `catch_unwind` on 16 MiB-stack workers. A watchdog fails
   `/healthz` if a job runs past 10× its deadline. `pdf_oxide`'s object parser is patched with a nesting
   limit (see below), because an unbounded recursion would otherwise abort the process.
+- **Request logs** are JSON, with method, path, request ID, status and duration in milliseconds.
+  `/healthz` calls are silent, including unsuccessful probes. Other requests log at INFO,
+  client errors at WARN, and server errors at ERROR. API errors include their problem category
+  and static title; query strings, tokens, document bytes and engine error details are omitted.
 - **Metrics** (`/metrics`, Prometheus): RED per route, admission wait, in-flight, 429s, documents per
   kind/format, OCR pages and latency per language, `lang_source`, engine panics and timeouts.
 - **Measured performance** is in [docs/performance.md](docs/performance.md). Integration recipes for
   n8n and Dify are in [docs/integrations.md](docs/integrations.md).
 
-## Deployment (zd)
+## Deployment
 
-`deployments/` follows the zap-infra layout and deploys with the zap CLI (`zd`, `zb`, `zbd`) to the
-"docs" VPS, the same server, Caddy and `web` network that run Collabora
-(`zap-infra/collabora/deployments/production.docs.yaml`).
-
-| File | Purpose |
-|---|---|
-| `deployments/production.docs.yaml` | target host, domain, image and `OXIDE_API_*` settings |
-| `docker-compose.yml` | the server compose: pulls `ghcr.io/paznoiro/paz-oxide-api`, no host port, hardened (local run: `./scripts/local.sh`) |
-| `deployments/caddy-sites/oxide-api.caddy` | Caddy site: TLS, 40 MB body cap, `/metrics` kept off the internet |
-| `scripts/local.sh` | local run of the server compose on `localhost:8080`, no SSH or Caddy |
+The workflow publishes images; deploying a container is a separate operation.
+`docker-compose.yml` pulls from GHCR and exposes port 8080 on the external `web` network.
+Provide `OXIDE_API_API_KEY` and any other settings in a local, untracked `.env` file, then run:
 
 ```sh
-export OXIDE_API_API_KEY=$(openssl rand -hex 32)          # keep it: clients need it
-zd  deployments/production.docs.yaml --dry-run            # preview
-zbd deployments/production.docs.yaml --tag 0.3.0          # build linux/amd64, push to GHCR, deploy
-zd  deployments/production.docs.yaml --tag 0.3.0          # redeploy a tag that's already pushed
-URL=https://oxide-api.zaporion.com make smoke             # end-to-end checks against the server
-./scripts/local.sh                                       # local run of the server compose on localhost:8080
+docker network create web                  # once, if the network does not exist
+IMAGE_TAG=0.3.1 docker compose pull
+IMAGE_TAG=0.3.1 docker compose up -d
 ```
 
-- **Before the first deploy:** add a DNS record for `oxide-api.zaporion.com` pointing at the server,
-  and run `docker login ghcr.io` locally with a token that can write packages. The server is already
-  logged in to GHCR.
-- **The API key** is read from your shell when `zd` runs, and `zd` stops if it's unset. To keep it in
-  Doppler instead, add a `doppler:` block (see the comment in the yaml).
-- **Building on a Mac** is fast even though the server is x86_64: every `RUN` stage executes on the
-  build machine and the Rust stage cross-compiles, so nothing runs under emulation.
-- **The OCR deadline is 90 s** on the server (instead of 120 s), because Cloudflare's proxy ends
-  responses that take longer than 100 s. Slow scans come back as partial results.
-- **On the server**, the container is `oxide-api` in `/opt/oxide-api`. The image has no shell; use
-  `docker logs oxide-api`, and `docker exec oxide-api oxide-api healthcheck` for a probe.
+Choose the version from the successful workflow summary. `IMAGE_TAG=latest` follows the newest
+successful build when you explicitly pull it. Configure your reverse proxy separately and keep
+`/metrics` private. For local use, `./scripts/local.sh` publishes port 8080 without a proxy.
+The image has no shell; use `docker logs oxide-api` and
+`docker exec oxide-api oxide-api healthcheck` for diagnostics.
 
 ## Development
 
@@ -352,7 +420,15 @@ native-only binary (images then report `ocr.status: "unavailable"`).
    (`tests/fixtures/misfiled_xref.pdf`). Such objects are now found by header scan or in the object
    streams; when neither has them, the old outcome stands.
 
-Drop them once upstream ships fixes.
+4. **`markdown-tables`**: HTML-generated PDFs may draw a separate underline for each cell,
+   without vertical rules. Repeated matching border segments now define the actual columns
+   and row bands, keeping wrapped descriptions in their cell. Tables participate in Markdown
+   reading order as whole blocks, so a side-by-side buyer is read before the item table.
+   `tests/fixtures/facturx-basic.pdf` is the InvoiceXML demonstration invoice (test data only)
+   used to check the six-column item table and the two-row VAT table through the API.
+
+Drop them once upstream ships fixes. Markdown preserves semantic structure, not the PDF's exact
+page styling; scanned pages still have only the lines and paragraphs supplied by OCR.
 
 ## Deviations from PLAN.md
 
@@ -361,7 +437,7 @@ Drop them once upstream ships fixes.
 | Two images (`:slim` < 20 MB, `:ocr` ≈ 100 MB) | **one image** with OCR | one container that does everything is simpler to run |
 | PDF and Office input | adds **OpenDocument** and **images** | requested later; ODF goes through an own reader into `office_oxide`'s document model, images straight to OCR |
 | ONNX Runtime 1.23.x | **1.28.3** | `ort` 2.0.0-rc.13 (pinned by `pdf_oxide`) enables `api-27` and refuses older runtimes |
-| Stock `pdf_oxide` | two small patches | see above |
+| Stock `pdf_oxide` | four patches | see above |
 | OCR reads the page's largest image | same, **plus page rendering** for legacy-font pages, `ocr=force` and pages without a usable scan | Kruti Dev pages are vector text with no image to OCR |
 | Image has no fonts | adds Liberation Sans/Serif/Mono (≈ 2.4 MB) | rendering a page whose Helvetica/Times/Courier isn't embedded otherwise produces a blank image |
 | `page_font_face_lookups()` | reads each requested page's `/Resources /Font` | the upstream call walks every page of the document |
@@ -369,21 +445,13 @@ Drop them once upstream ships fixes.
 | `cargo-chef` | BuildKit cache mounts | simpler with the vendored path dependency; same rebuild speed locally |
 | k6 | `scripts/loadtest.py` (stdlib) | no extra tooling needed |
 
-## Status
+## Validation and limitations
 
-Done and verified locally on arm64: all of M0–M2; M3/M4 except publishing, plus OpenDocument and
-image input. `make test` passes 45 unit, 20 API and 13 OCR tests, `make smoke` passes all 68 checks
-against the container, and clippy passes with `-D warnings` with and without the `ocr` feature. Six
-concurrent 48-megapixel JPEGs OCR correctly in under 3 s, with the container peaking at about
-1.8 GiB of its 3 GiB limit (two images are decoded at a time, one per OCR worker). The cross-compiled `linux/amd64` image
-also passes `make smoke` under emulation, run with `docker-compose.yml` behind the Caddy
-site from `deployments/`.
+The release workflow runs native-only and OCR-enabled tests, Clippy with warnings denied,
+Rust 1.92 compatibility checks, and container smoke tests before publishing. See
+[GitHub Actions](https://github.com/paznoiro/paz-oxide-api/actions/workflows/docker-release.yml)
+for the status of each commit and its published image digest.
 
-Not done yet:
-
-- The GitHub Actions workflow (`.github/workflows/ci.yml`) has never been run.
-- Nothing has been pushed to GHCR or deployed to the server yet, and nothing is cosign-signed.
-- Container limits (4 CPU / 3 GiB) are still the plan's starting values, because peaks were measured with small
-  fixtures rather than the largest real documents.
-- There's no real Kruti Dev font fixture (the fixture renames a Latin font, so it only exercises
-  routing) and no JBIG2 scan fixture.
+Container limits (4 CPU / 3 GiB) are starting values; tune them using production document sizes.
+The legacy Hindi font fixture exercises routing rather than a real Kruti Dev font, and there
+is no JBIG2 scan fixture. Publishing an image does not deploy it to a server.

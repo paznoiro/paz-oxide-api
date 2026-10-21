@@ -297,8 +297,17 @@ pub fn merge_native_and_ocr(native: &str, ocr: &str) -> String {
     if native_trimmed.trim().is_empty() {
         return ocr.to_string();
     }
+    let extra = extra_ocr_lines(native_trimmed, ocr);
+    if extra.is_empty() {
+        return native.to_string();
+    }
+    format!("{native_trimmed}\n{}", extra.join("\n"))
+}
+
+/// OCR additions shared by text assembly and structured block merging.
+pub fn extra_ocr_lines<'a>(native: &str, ocr: &'a str) -> Vec<&'a str> {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-    let native_norm = norm(native_trimmed);
+    let native_norm = norm(native);
     let mut extra: Vec<&str> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for line in ocr.lines() {
@@ -310,10 +319,7 @@ pub fn merge_native_and_ocr(native: &str, ocr: &str) -> String {
         seen.push(ln);
         extra.push(lt);
     }
-    if extra.is_empty() {
-        return native.to_string();
-    }
-    format!("{native_trimmed}\n{}", extra.join("\n"))
+    extra
 }
 
 #[cfg(test)]

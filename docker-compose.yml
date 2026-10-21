@@ -1,14 +1,12 @@
-# Server compose for oxide-api, uploaded and run by `zd`
-# (deployments/production.docs.yaml: `compose: file: docker-compose.yml`).
+# Server compose for oxide-api. Set IMAGE_TAG to a published GHCR version.
 # The image is pulled from GHCR; nothing is built on the server.
 # Local run without SSH or Caddy: ./scripts/local.sh (publishes :8080).
 #
-# zd renders the deployment yaml's env: block into a tmpfs file, uses it for
-# the ${IMAGE_REPO}/${IMAGE_TAG} interpolation below and exports its path as
-# ZAP_ENV_FILE, so the API key never touches the server's disk.
+# Container settings come from .env, or the file selected by ZAP_ENV_FILE.
+# IMAGE_REPO and IMAGE_TAG can be overridden in the shell.
 services:
   oxide-api:
-    image: ${IMAGE_REPO:-ghcr.io/paznoiro/paz-oxide-api}:${IMAGE_TAG:-0.3.0}
+    image: ${IMAGE_REPO:-ghcr.io/paznoiro/paz-oxide-api}:${IMAGE_TAG:-latest}
     container_name: oxide-api
     restart: unless-stopped
     # SIGTERM fails /readyz and lets in-flight requests finish; an OCR request
@@ -18,7 +16,7 @@ services:
     # --- reap zombie processes (PID 1) ---
     init: true
 
-    # Every OXIDE_API_* setting comes from the deployment yaml. format: raw
+    # OXIDE_API_* settings come from the env file. format: raw
     # stops compose from interpolating values, so a `$` in a secret survives.
     env_file:
       - path: ${ZAP_ENV_FILE:-.env}
@@ -29,7 +27,7 @@ services:
       - "8080"
 
     # The image's HEALTHCHECK (`oxide-api healthcheck`, GET /healthz) is used
-    # as is; zd waits for it to report healthy.
+    # as is; inspect the container health status after starting it.
 
     # --- log rotation (json-file driver) ---
     logging:

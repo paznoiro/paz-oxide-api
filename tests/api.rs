@@ -217,6 +217,77 @@ async fn native_pdf_text_markdown_and_pages() {
 }
 
 #[tokio::test]
+async fn invoice_markdown_preserves_segmented_tables_and_wrapped_cells() {
+    let app = app();
+    let pdf = fixture("facturx-basic.pdf");
+    for uri in [
+        "/v1/extract/markdown?ocr=off",
+        "/v1/extract/markdown?ocr=off&detect_headings=false",
+    ] {
+        let r = send(&app, raw_req(uri, pdf.clone())).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        let j = r.json();
+        assert_eq!(j["ocr"]["status"], "off");
+        let md = j["text"].as_str().unwrap();
+        assert!(
+            md.contains("| # | Item | Qty | Unit price | VAT % | Net |"),
+            "{md}"
+        );
+        assert!(
+            md.contains(
+                "| 1 | E-invoicing integration services | 24 HUR | 145.00 | 19% | **3,480.00** |"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("| 2 | InvoiceXML API subscription, annual + 120.00 (Priority support) | 1 Unit (piece) | 2,400.00 | 19% | **2,520.00** |"), "{md}");
+        assert!(
+            md.contains(
+                "| 3 | On-site onboarding workshop | 2 DAY | 980.00 | 19% | **1,960.00** |"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains("| Category | Rate | Taxable amount | Tax amount |"),
+            "{md}"
+        );
+        assert!(md.contains("| S | 19% | 7,805.00 | 1,482.95 |"), "{md}");
+        for phrase in [
+            "E-invoicing integration services",
+            "Priority support",
+            "On-site onboarding workshop",
+        ] {
+            assert_eq!(md.matches(phrase).count(), 1, "duplicated table text: {md}");
+        }
+        assert!(
+            md.find("Demonstration SARL").unwrap() < md.find("LINE ITEMS").unwrap(),
+            "buyer moved below items: {md}"
+        );
+        assert!(
+            md.find("DE123456789").unwrap() < md.find("BUYER").unwrap(),
+            "seller tax ID moved into buyer block: {md}"
+        );
+        assert!(
+            md.find("FR12345678901").unwrap() > md.find("BUYER").unwrap(),
+            "{md}"
+        );
+        assert!(md.contains("9,287.95 EUR"), "{md}");
+        assert!(md.contains("Payment terms: Payable within 30 days"), "{md}");
+    }
+    // The indexing / regex path still reads every line item exactly once.
+    let r = send(&app, raw_req("/v1/extract/text?ocr=off", pdf)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    let text = j["text"].as_str().unwrap();
+    for phrase in [
+        "E-invoicing integration services",
+        "Priority support",
+        "On-site onboarding workshop",
+    ] {
+        assert_eq!(text.matches(phrase).count(), 1, "{text}");
+    }
+}
+
+#[tokio::test]
 async fn ignored_params_are_listed() {
     let app = app();
     let r = send(&app, raw_req("/v1/extract/text?pages=1&ocr=off&lang=hi&detect_headings=false&foo=bar", fixture("sample.docx"))).await;
@@ -646,7 +717,7 @@ async fn ops_endpoints() {
 #[tokio::test]
 async fn openapi_documents_every_route() {
     let spec: Value = serde_json::from_str(oxide_api::OPENAPI_JSON).unwrap();
-    for path in ["/v1/extract/text", "/v1/extract/markdown", "/v1/extract/fields", "/v1/info", "/healthz", "/readyz", "/version", "/metrics"] {
+    for path in ["/v1/extract/text", "/v1/extract/markdown", "/v1/extract/fields", "/v1/extract/document", "/v1/info", "/healthz", "/readyz", "/version", "/metrics"] {
         assert!(spec["paths"].get(path).is_some(), "{path} missing from openapi.json");
     }
     // The YAML and JSON contracts are the same document.
@@ -1079,4 +1150,160 @@ fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
         .collect()
+}
+
+/// The structured response is also usable as a sequence of citable text blocks.
+fn assert_document(j: &Value) {
+    assert_eq!(j["schema_version"], "1.0");
+    assert_eq!(j["coordinate_system"], json!({"unit":"pt", "origin":"top_left", "x_direction":"right", "y_direction":"down"}));
+    let pages = j["pages"].as_array().unwrap();
+    assert_eq!(j["pages_extracted"], Value::Array(pages.iter().map(|p| p["page"].clone()).collect()));
+    let mut chars = 0;
+    for page in pages {
+        let blocks = page["blocks"].as_array().unwrap();
+        let joined = blocks.iter().map(|b| b["text"].as_str().unwrap()).collect::<Vec<_>>().join("\n");
+        assert_eq!(page["text"], joined);
+        chars += joined.chars().count();
+        for (i, block) in blocks.iter().enumerate() {
+            assert_eq!(block["reading_order"], i);
+            assert_eq!(block["id"], format!("p{}-b{i}", page["page"]));
+            if let Some(bbox) = block["bbox"].as_object() {
+                let n = |k: &str| bbox[k].as_f64().unwrap();
+                assert!(n("x") >= -0.01 && n("y") >= -0.01, "{block}");
+                assert!(n("width") > 0.0 && n("height") > 0.0, "{block}");
+                assert!(n("x") + n("width") <= page["width"].as_f64().unwrap() + 0.1, "{block}");
+                assert!(n("y") + n("height") <= page["height"].as_f64().unwrap() + 0.1, "{block}");
+            }
+            if block["source"] == "native" {
+                assert!(block["confidence"].is_null());
+                assert!(block["font"].is_object());
+            }
+        }
+    }
+    assert_eq!(j["char_count"], chars);
+}
+
+#[tokio::test]
+async fn structured_document_native_encodings_and_selection() {
+    let app = app();
+    let pdf = fixture("native.pdf");
+    let requests = [
+        raw_req("/v1/extract/document?pages=2", pdf.clone()),
+        multipart_req("/v1/extract/document", &pdf, Some("native.pdf"), &[("pages", "2")]),
+        json_req("/v1/extract/document?pages=1", &pdf, json!({"pages":"2"})),
+    ];
+    for mut req in requests {
+        req.headers_mut().insert(header::ACCEPT, "text/plain".parse().unwrap());
+        let r = send(&app, req).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        assert_eq!(r.header("content-type"), Some("application/json"));
+        assert_eq!(r.header("cache-control"), Some("no-store"));
+        assert!(r.header("x-engine").unwrap().starts_with("pdf_oxide/"));
+        assert!(r.header("server-timing").is_some());
+        let j = r.json();
+        assert_document(&j);
+        assert_eq!(j["page_count"], 3);
+        assert_eq!(j["pages_extracted"], json!([2]));
+        assert_eq!(j["ocr"]["status"], "native");
+        assert!(j["pages"][0]["text"].as_str().unwrap().contains("page-two-beta"));
+        assert!(!j["pages"][0]["blocks"].as_array().unwrap().is_empty());
+        assert!(j.get("text").is_none(), "text is returned once per page");
+    }
+}
+
+#[tokio::test]
+async fn structured_document_limits_errors_and_unavailable_ocr() {
+    let (app, _) = app_with(&[("OXIDE_API_OCR_MODEL_DIR", "/nonexistent/structured-models")]);
+    let r = send(&app, raw_req("/v1/extract/document", fixture("scan_en.pdf"))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_document(&j);
+    assert_eq!(j["ocr"]["status"], "unavailable");
+    assert_eq!(j["ocr"]["pages_needing_ocr"], json!([1]));
+    assert_eq!(j["pages"][0]["blocks"], json!([]));
+    let r = send(&app, raw_req("/v1/extract/document?ocr=off", fixture("scan_en.pdf"))).await;
+    assert_eq!(r.json()["ocr"]["status"], "off");
+    for file in ["sample.docx", "scan_en.png", "locked.pdf"] {
+        let r = send(&app, raw_req("/v1/extract/document", fixture(file))).await;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{file}: {}", r.text());
+    }
+    for params in ["pages=0", "pages=99", "ocr=maybe", "lang=xx"] {
+        let r = send(&app, raw_req(&format!("/v1/extract/document?{params}"), fixture("native.pdf"))).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{params}: {}", r.text());
+    }
+    let r = send(&app, Request::post("/v1/extract/document").body(Body::from(fixture("native.pdf"))).unwrap()).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    // build_state configures Office's process-global budget. Keep that at its
+    // default so this PDF-only limit test cannot affect concurrent Office tests.
+    let mut state = oxide_api::build_state(config(&[]));
+    Arc::get_mut(&mut state).unwrap().cfg.max_text_chars = 35;
+    let small = oxide_api::build_router(state);
+    let r = send(&small, raw_req("/v1/extract/document", fixture("native.pdf"))).await;
+    let j = r.json();
+    assert_eq!(r.status, StatusCode::OK, "{j}");
+    assert_document(&j);
+    assert_eq!(j["truncated"], true);
+    assert_eq!(j["pages"][0]["truncated"], true);
+    assert_eq!(j["pages_extracted"], json!([1]));
+    assert_eq!(j["char_count"], 35);
+}
+
+#[tokio::test]
+async fn structured_document_cropped_rotated_page_and_schema() {
+    let app = app();
+    let pdf = String::from_utf8(many_page_pdf(1)).unwrap()
+        .replace("/MediaBox [0 0 612 792]", "/MediaBox [10 20 622 812] /CropBox [40 600 400 760] /Rotate 90");
+    let r = send(&app, raw_req("/v1/extract/document?ocr=off", pdf.into_bytes())).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_document(&j);
+    let page = &j["pages"][0];
+    assert_eq!(page["width"], 160.0);
+    assert_eq!(page["height"], 360.0);
+    assert_eq!(page["rotation"], 90);
+    assert!(!page["blocks"].as_array().unwrap().is_empty());
+    let spec: Value = serde_json::from_str(oxide_api::OPENAPI_JSON).unwrap();
+    for (value, schema) in [(&j, "DocumentExtraction"), (page, "DocumentPage"), (&page["blocks"][0], "DocumentBlock")] {
+        let schema = &spec["components"]["schemas"][schema];
+        for key in schema["required"].as_array().unwrap() {
+            assert!(value.get(key.as_str().unwrap()).is_some(), "missing {key}");
+        }
+        for key in value.as_object().unwrap().keys() {
+            assert!(schema["properties"].get(key).is_some(), "undocumented {key}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn structured_document_deadline_returns_only_completed_pages() {
+    let (app, _) = app_with(&[("OXIDE_API_PROCESS_TIMEOUT_SECS", "1"), ("OXIDE_API_MAX_PDF_PAGES", "100000")]);
+    let r = send(&app, raw_req("/v1/extract/document", many_page_pdf(30_000))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_document(&j);
+    assert_eq!(j["incomplete"], true);
+    let done = j["pages_extracted"].as_array().unwrap();
+    assert!(!done.is_empty() && done.len() < 30_000);
+    assert!(done.iter().enumerate().all(|(i, p)| p.as_u64() == Some(i as u64 + 1)));
+}
+
+#[tokio::test]
+async fn structured_document_native_scripts_and_empty_pages() {
+    let app = app();
+    for (file, marker) in [("native_hi.pdf", "भारत"), ("native_ar.pdf", "مرحبا"), ("scan_en_ocr_layer.pdf", "Invoice 4471")] {
+        let r = send(&app, raw_req("/v1/extract/document", fixture(file))).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+        let j = r.json();
+        assert_document(&j);
+        assert_eq!(j["ocr"]["status"], "native");
+        assert!(j["pages"][0]["text"].as_str().unwrap().contains(marker), "{j}");
+    }
+    let pdf = String::from_utf8(many_page_pdf(1)).unwrap().replace("Page 1 of the long fixture", "");
+    let r = send(&app, raw_req("/v1/extract/document?ocr=off", pdf.into_bytes())).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_document(&j);
+    assert_eq!(j["pages_extracted"], json!([1]));
+    assert_eq!(j["pages"][0]["blocks"], json!([]));
+    assert_eq!(j["char_count"], 0);
 }

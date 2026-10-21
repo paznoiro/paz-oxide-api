@@ -1,0 +1,296 @@
+Recover tables from repeated cell underlines and keep them atomic in Markdown reading order.
+
+--- a/src/document.rs
++++ b/src/document.rs
+@@ -6832,7 +6832,7 @@
+                 // `is_multi_column_page`) is reordered instead of interleaved;
+                 // both gutter detectors return None on single-column pages, which
+                 // then fall through to the row-aware branch unchanged.
+-                Self::reorder_column_major_with_bands(&mut spans, gutter_x);
++                Self::reorder_column_major_with_bands(&mut spans, gutter_x, None);
+                 // NB: do NOT run reorder_same_line_runs here. The column emit
+                 // already orders each column by (y desc, x asc); a same-line
+                 // X-sort would re-merge vertically-adjacent lines whenever the
+@@ -15235,7 +15235,10 @@
+     /// the reading order of a two-column body. Returns `true` if a reorder was
+     /// applied (the caller can then suppress geometric block re-ordering that
+     /// would otherwise re-derive row-major order from positions).
+-    fn reorder_two_column_prose(spans: &mut Vec<crate::layout::TextSpan>) -> bool {
++    fn reorder_two_column_prose(
++        spans: &mut Vec<crate::layout::TextSpan>,
++        column_block_floor: Option<f32>,
++    ) -> bool {
+         // Both gutter detectors, in the order the text path tries them.
+         //
+         // Asking only the first one is what broke the promise above. The
+@@ -15255,7 +15258,7 @@
+         match Self::prose_two_column_gutter(spans).or_else(|| Self::classifier_column_gutter(spans))
+         {
+             Some(gutter_x) => {
+-                Self::reorder_column_major_with_bands(spans, gutter_x);
++                Self::reorder_column_major_with_bands(spans, gutter_x, column_block_floor);
+                 true
+             },
+             None => false,
+@@ -15269,7 +15272,11 @@
+     /// around it. Column runs are flushed left-column-then-right-column. This is
+     /// the §14.8.3 layout model: full-width BLSEs interleave with columns by
+     /// block position, so a mid-body heading is NOT split across the gutter.
+-    fn reorder_column_major_with_bands(spans: &mut Vec<crate::layout::TextSpan>, gutter_x: f32) {
++    fn reorder_column_major_with_bands(
++        spans: &mut Vec<crate::layout::TextSpan>,
++        gutter_x: f32,
++        column_block_floor: Option<f32>,
++    ) {
+         use crate::layout::TextSpan;
+         // A genuine full-width BAND (title/heading/footer that spans both
+         // columns) extends meaningfully on BOTH sides of the gutter. Require an
+@@ -15301,6 +15308,9 @@
+             }
+             // A full line-height, used to decide when a block sits clearly
+             // *below* the opposite column rather than beside it.
++            let keep_column_blocks = column_block_floor.is_some_and(|floor| {
++                buf.iter().all(|s| s.bbox.y >= floor - 3.0)
++            });
+             let mut heights: Vec<f32> = buf.iter().map(|s| s.bbox.height).collect();
+             heights.sort_by(|a, b| crate::utils::safe_float_cmp(*a, *b));
+             let line_h = heights
+@@ -15331,8 +15341,11 @@
+                 |v: &[TextSpan]| v.iter().map(|s| s.bbox.y).fold(f32::INFINITY, f32::min);
+             let right_bottom = bottom_y(&right);
+             let left_bottom = bottom_y(&left);
++            // Table bands already bound these column groups. Keep an
++            // asymmetric party/address block intact above its table rather
++            // than peeling its last line into the neighbouring party.
+             let mut trailing: Vec<TextSpan> = Vec::new();
+-            if right.len() >= 2 {
++            if !keep_column_blocks && right.len() >= 2 {
+                 left.retain(|s| {
+                     let below = s.bbox.y < right_bottom - line_h;
+                     if below {
+@@ -15341,7 +15354,7 @@
+                     !below
+                 });
+             }
+-            if left.len() >= 2 {
++            if !keep_column_blocks && left.len() >= 2 {
+                 right.retain(|s| {
+                     let below = s.bbox.y < left_bottom - line_h;
+                     if below {
+@@ -22050,12 +22063,11 @@
+         // fallback: a short-cell two-column body must read column-major as
+         // prose, not be re-gridded row-wise into a table.
+         let two_col_prose = Self::prose_two_column_gutter(&base_spans).is_some();
+-        let tables = if options.extract_tables && !two_col_prose {
+-            // text_fallback=true: to_markdown explicitly targets structured output,
+-            // so we enable the text-only spatial fallback for line-less tables
+-            // (e.g. sailing-score grids with no ruling lines — issue #486).
++        let tables = if options.extract_tables {
++            // Prose suppresses text-only guesses, never explicit ruling grids.
++            // Other pages retain the text-only fallback for line-less tables.
+             Self::tables_in_frame(
+-                self.extract_page_tables(page_index, &base_spans, options, true),
++                self.extract_page_tables(page_index, &base_spans, options, !two_col_prose),
+                 reading_frame,
+             )
+         } else {
+@@ -22063,6 +22075,49 @@
+         };
+ 
+         let mut spans = base_spans;
++        let mut table_anchors = Vec::new();
++        // A table is one layout block. Ordering its cells as separate prose
++        // columns moves the right-hand invoice party below the item table.
++        // Wide anchors let column-band ordering flush both parties first.
++        for table in &tables {
++            let Some(bbox) = table.bbox else { continue };
++            // Keep unclaimed ink in the flow for orphan recovery.
++            let contains = |s: &TextSpan| {
++                crate::pipeline::converters::span_in_table(
++                    &crate::pipeline::OrderedTextSpan::new(s.clone(), 0),
++                    std::slice::from_ref(table),
++                )
++                .is_some()
++            };
++            let Some(mut anchor) = spans
++                .iter()
++                .find(|s| contains(s) && s.text.chars().filter(|c| c.is_alphanumeric()).count() > 1)
++                .cloned()
++            else {
++                continue;
++            };
++            spans.retain(|s| !contains(s));
++            let ink_bbox = anchor.bbox;
++            // Keep a nearby left-aligned caption with the table band, so a
++            // column reorder cannot leave "LINE ITEMS" inside the seller.
++            let caption = spans.iter().filter(|s| {
++                s.font_weight.is_bold()
++                    && (s.bbox.x - bbox.x).abs() <= 3.0
++                    && s.bbox.y >= bbox.y + bbox.height
++                    && s.bbox.y - (bbox.y + bbox.height) <= s.font_size.max(1.0) * 3.0
++            }).min_by(|a, b| crate::utils::safe_float_cmp(a.bbox.y, b.bbox.y));
++            let layout_x = caption.map_or(bbox.x, |s| s.bbox.x + 1.0);
++            let layout_y = caption.map_or(bbox.y + bbox.height - anchor.bbox.height, |s| s.bbox.y);
++            anchor.bbox = crate::geometry::Rect::new(
++                layout_x,
++                layout_y,
++                bbox.x + bbox.width - layout_x,
++                anchor.bbox.height,
++            );
++            table_anchors.push((anchor.bbox, ink_bbox));
++            spans.push(anchor);
++        }
++
+         if options.include_form_fields {
+             spans.extend(self.widget_spans_in_frame(page_index, reading_frame));
+         }
+@@ -22082,7 +22137,8 @@
+         // than interleaving rows. When it fires (untagged pages only), the
+         // pipeline preserves this order instead of re-deriving a row-major one;
+         // a trustworthy struct tree's mcid order still wins.
+-        let prose_reordered = Self::reorder_two_column_prose(&mut spans);
++        let column_block_floor = table_anchors.iter().map(|(layout, _)| layout.y).reduce(f32::max);
++        let prose_reordered = Self::reorder_two_column_prose(&mut spans, column_block_floor);
+ 
+         // Publisher-metadata sidebar segregation (RW-1 D3): same gate + emit as
+         // the plain-text path; preserve the order so the pipeline does not
+@@ -22275,6 +22331,14 @@
+             None => spans,
+         };
+         let mut ordered_spans = pipeline.process(spans, context)?;
++
++        // The wide geometry is only for reading order. Table ownership checks
++        // match against the original ink that the cells actually render.
++        for span in &mut ordered_spans {
++            if let Some((_, ink)) = table_anchors.iter().find(|(layout, _)| *layout == span.span.bbox) {
++                span.span.bbox = *ink;
++            }
++        }
+ 
+         // Annotate ordered spans with the per-MCID structural role
+         // paragraph block-id so the markdown converter can emit headings
+@@ -22728,7 +22792,7 @@
+         // than interleaving rows. When it fires (untagged pages only), the
+         // pipeline preserves this order instead of re-deriving a row-major one;
+         // a trustworthy struct tree's mcid order still wins.
+-        let prose_reordered = Self::reorder_two_column_prose(&mut spans);
++        let prose_reordered = Self::reorder_two_column_prose(&mut spans, None);
+ 
+         // Publisher-metadata sidebar segregation (RW-1 D3): same gate + emit as
+         // the plain-text path. When it fires, preserve the order so the pipeline
+--- a/src/structure/spatial_table_detector.rs
++++ b/src/structure/spatial_table_detector.rs
+@@ -3905,6 +3905,103 @@
+     tables
+ }
+ 
++/// HTML-to-PDF producers often draw one horizontal border per cell, with
++/// no vertical rules. Repeated, touching border segments give exact columns
++/// and row bands; do not re-infer them from word centres or split wrapped cells.
++fn detect_segmented_rule_tables(
++    spans: &[TextSpan],
++    lines: &[crate::elements::PathContent],
++    config: &TableDetectionConfig,
++) -> Vec<Table> {
++    const SNAP: f32 = 2.0;
++    let mut pieces: Vec<_> = lines.iter()
++        .filter(|p| p.is_horizontal_line(SNAP))
++        .map(|p| p.rendered_bbox())
++        .filter(|r| r.x.is_finite() && r.y.is_finite() && r.width.is_finite()
++            && r.width > SNAP && r.height <= SNAP)
++        .collect();
++    pieces.sort_by(|a, b| crate::utils::safe_float_cmp(b.y, a.y)
++        .then_with(|| crate::utils::safe_float_cmp(a.x, b.x)));
++    let mut levels: Vec<(f32, Vec<crate::geometry::Rect>)> = Vec::new();
++    for piece in pieces {
++        if let Some((_, row)) = levels.last_mut().filter(|(y, _)| (*y - piece.y).abs() <= SNAP) {
++            row.push(piece);
++        } else {
++            levels.push((piece.y, vec![piece]));
++        }
++    }
++    let mut families: Vec<(Vec<f32>, Vec<f32>)> = Vec::new();
++    for (y, mut row) in levels {
++        row.sort_by(|a, b| crate::utils::safe_float_cmp(a.x, b.x));
++        row.dedup_by(|a, b| (a.x - b.x).abs() <= SNAP && (a.width - b.width).abs() <= SNAP);
++        let mut runs: Vec<Vec<f32>> = Vec::new();
++        for r in row {
++            if let Some(run) = runs.last_mut().filter(|v| (v[v.len() - 1] - r.x).abs() <= SNAP) {
++                run.push(r.x + r.width);
++            } else {
++                runs.push(vec![r.x, r.x + r.width]);
++            }
++        }
++        for edges in runs {
++            let cols = edges.len() - 1;
++            if cols < config.min_table_columns.max(2) || cols > config.max_table_columns
++                || edges[cols] - edges[0] < 100.0 { continue; }
++            if let Some((_, ys)) = families.iter_mut().find(|(xs, ys)| xs.len() == edges.len()
++                && xs.iter().zip(&edges).all(|(a, b)| (a - b).abs() <= SNAP)
++                // A distant table with the same columns starts a new family.
++                && ys.last().is_some_and(|last| last - y <= 72.0)) {
++                ys.push(y);
++            } else {
++                families.push((edges, vec![y]));
++            }
++        }
++    }
++    let mut tables = Vec::new();
++    for (xs, ys) in families {
++        // At least two identically segmented rules: one underline is not a grid.
++        let group = ys.as_slice();
++        if group.len() < 2 { continue; }
++        let cols = xs.len() - 1;
++        let top = group[0];
++        let bottom = *group.last().unwrap();
++        let header: Vec<_> = spans.iter().filter(|s| {
++            let c = s.bbox.center();
++            c.x >= xs[0] && c.x <= xs[cols] && c.y > top
++                && c.y - top <= s.font_size.max(1.0) * 2.0
++        }).collect();
++        let header_top = header.iter().map(|s|s.bbox.y + s.bbox.height).fold(top, f32::max);
++        let mut bands = vec![header_top + 1.0];
++        bands.extend_from_slice(group);
++        let mut table = Table::new();
++        table.col_count = cols;
++        table.has_header = true;
++        table.bbox = Some(crate::geometry::Rect::new(xs[0], bottom, xs[cols] - xs[0], header_top + 1.0 - bottom));
++        for (ri, band) in bands.windows(2).enumerate() {
++            let mut row = TableRow { cells: Vec::new(), is_header: ri == 0 };
++            for (ci, col) in xs.windows(2).enumerate() {
++                let mut cell = TableCell::new(String::new(), ri == 0);
++                cell.bbox = Some(crate::geometry::Rect::new(col[0], band[1], col[1]-col[0], band[0]-band[1]));
++                cell.spans = spans.iter().filter(|s| {
++                    let c = s.bbox.center();
++                    c.x >= col[0] && (c.x < col[1] || (ci == cols - 1 && c.x == col[1]))
++                        && c.y >= band[1] && c.y < band[0]
++                }).cloned().collect();
++                cell.spans.sort_by(|a,b| crate::utils::row_aware_span_cmp(
++                    a.bbox.y,a.bbox.x,b.bbox.y,b.bbox.x));
++                cell.text = cell.spans.iter().map(span_text_for_cell).collect::<Vec<_>>().join(" ");
++                row.cells.push(cell);
++            }
++            table.rows.push(row);
++        }
++        if table.is_real_grid() && is_valid_table(&table)
++            && table.rows.len() * cols >= config.min_table_cells {
++            tables.push(table);
++        }
++    }
++    tables
++}
++
++
+ /// Detect tables using vector lines and text spans (main entry point for hybrid detection).
+ pub fn detect_tables_with_lines(
+     spans: &[TextSpan],
+@@ -3936,6 +4033,9 @@
+     // Both / hybrid strategy: try intersection-based first, then cluster, then H-rule bounded,
+     // then text fallback.
+     let mut final_tables = detect_tables_from_intersections(spans, lines, config);
++    if final_tables.is_empty() {
++        final_tables = detect_segmented_rule_tables(spans, lines, config);
++    }
+     if final_tables.is_empty() {
+         let clusters = group_lines_into_clusters(lines, config);
+         for cluster in clusters {

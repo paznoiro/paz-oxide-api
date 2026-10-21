@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Oxide API",
-    "description": "Text and markdown extraction from PDF, Office (DOCX/XLSX/PPTX/DOC/XLS/PPT), OpenDocument (ODT/ODS/ODP) and image files (PNG/JPEG/TIFF/WebP/GIF/BMP/JP2/PNM/TGA), with OCR (en, hi, ar) for scanned PDFs and images. The file type is detected from the content, so every request in `extract` takes any of them.\n\nAuth: `OXIDE_API_API_KEY` as Bearer token on all `POST /v1/*`. Set the `apiKey` collection/environment variable. Ops endpoints (`GET /healthz`, `/readyz`, `/version`, `/metrics`, `/openapi.json`, `/openapi.yaml`, `/docs`) are unauthenticated.\n\nFolders: `extract` (every endpoint, any file), `images (OCR)` and `opendocument` (format-specific examples), `ops`.\n\nImport this file + `oxide-api.postman_environment.json` into Postman, set `apiKey` to your key, pick a file for the `file` form-data key on multipart requests. The file sources point at the repo's test fixtures: set Postman's working directory to the repo root (Settings → General → Working directory) to send them as-is, or pick your own file.",
+    "description": "Structured PDF extraction for downstream schema mapping, plus text and markdown extraction from PDF, Office (DOCX/XLSX/PPTX/DOC/XLS/PPT), OpenDocument (ODT/ODS/ODP) and image files (PNG/JPEG/TIFF/WebP/GIF/BMP/JP2/PNM/TGA), with OCR (en, hi, ar) for scanned PDFs and images. The file type is detected from the content, so every request in `extract` takes any of them.\n\nAuth: `OXIDE_API_API_KEY` as Bearer token on all `POST /v1/*`. Set the `apiKey` collection/environment variable. Ops endpoints (`GET /healthz`, `/readyz`, `/version`, `/metrics`, `/openapi.json`, `/openapi.yaml`, `/docs`) are unauthenticated.\n\nFolders: `extract` (every endpoint, any file), `images (OCR)` and `opendocument` (format-specific examples), `ops`.\n\nImport this file + `oxide-api.postman_environment.json` into Postman, set `apiKey` to your key, pick a file for the `file` form-data key on multipart requests. The file sources point at the repo's test fixtures: set Postman's working directory to the repo root (Settings → General → Working directory) to send them as-is, or pick your own file.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -27,6 +27,200 @@
     }
   ],
   "item": [
+    {
+      "name": "documents (structured)",
+      "description": "PDF extraction for downstream LLM schema mapping; no LLM calls. Fixture requests are ready to run from the repository root.",
+      "item": [
+        {
+          "name": "POST /v1/extract/document (digital PDF)",
+          "request": {
+            "method": "POST",
+            "description": "PDF only. Page text and ordered blocks in displayed page points. Native confidence is null; OCR confidence comes from the recognizer. No LLM mapping. Uses the shared OCR models and workers.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/document?lang=en",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "extract",
+                "document"
+              ],
+              "query": [
+                {
+                  "key": "lang",
+                  "value": "en"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "tests/fixtures/native.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with structured PDF pages\", function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  var j = pm.response.json();",
+                  "  pm.expect(j.schema_version).to.eql(\"1.0\");",
+                  "  pm.expect(j.pages).to.be.an(\"array\").that.is.not.empty;",
+                  "  j.pages.forEach(function (p) {",
+                  "    pm.expect(p.text).to.eql(p.blocks.map(function (b) { return b.text; }).join(\"\\n\"));",
+                  "    p.blocks.forEach(function (b, i) {",
+                  "      pm.expect(b.reading_order).to.eql(i);",
+                  "      if (b.source === \"native\") pm.expect(b.confidence).to.eql(null);",
+                  "      if (b.confidence !== null) pm.expect(b.confidence).to.be.within(0, 1);",
+                  "    });",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/document (scanned PDF)",
+          "request": {
+            "method": "POST",
+            "description": "PDF only. Page text and ordered blocks in displayed page points. Native confidence is null; OCR confidence comes from the recognizer. No LLM mapping. Uses the shared OCR models and workers.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/document?lang=en",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "extract",
+                "document"
+              ],
+              "query": [
+                {
+                  "key": "lang",
+                  "value": "en"
+                }
+              ]
+            },
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": "tests/fixtures/scan_en.pdf"
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with structured PDF pages\", function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  var j = pm.response.json();",
+                  "  pm.expect(j.schema_version).to.eql(\"1.0\");",
+                  "  pm.expect(j.pages).to.be.an(\"array\").that.is.not.empty;",
+                  "  j.pages.forEach(function (p) {",
+                  "    pm.expect(p.text).to.eql(p.blocks.map(function (b) { return b.text; }).join(\"\\n\"));",
+                  "    p.blocks.forEach(function (b, i) {",
+                  "      pm.expect(b.reading_order).to.eql(i);",
+                  "      if (b.source === \"native\") pm.expect(b.confidence).to.eql(null);",
+                  "      if (b.confidence !== null) pm.expect(b.confidence).to.be.within(0, 1);",
+                  "    });",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/extract/document (mixed page)",
+          "request": {
+            "method": "POST",
+            "description": "PDF only. Page text and ordered blocks in displayed page points. Native confidence is null; OCR confidence comes from the recognizer. No LLM mapping. Uses the shared OCR models and workers.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/document?lang=en",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "extract",
+                "document"
+              ],
+              "query": [
+                {
+                  "key": "lang",
+                  "value": "en"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "tests/fixtures/hybrid.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 with structured PDF pages\", function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  var j = pm.response.json();",
+                  "  pm.expect(j.schema_version).to.eql(\"1.0\");",
+                  "  pm.expect(j.pages).to.be.an(\"array\").that.is.not.empty;",
+                  "  j.pages.forEach(function (p) {",
+                  "    pm.expect(p.text).to.eql(p.blocks.map(function (b) { return b.text; }).join(\"\\n\"));",
+                  "    p.blocks.forEach(function (b, i) {",
+                  "      pm.expect(b.reading_order).to.eql(i);",
+                  "      if (b.source === \"native\") pm.expect(b.confidence).to.eql(null);",
+                  "      if (b.confidence !== null) pm.expect(b.confidence).to.be.within(0, 1);",
+                  "    });",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
     {
       "name": "extract",
       "description": "Authenticated. Bearer `{{apiKey}}` (= `OXIDE_API_API_KEY`) is inherited from the collection.",

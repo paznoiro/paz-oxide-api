@@ -26,7 +26,7 @@ env_file_key() {
 }
 
 IMAGE_REPO="${IMAGE_REPO:-ghcr.io/paznoiro/paz-oxide-api}"
-IMAGE_TAG="${IMAGE_TAG:-0.3.0}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
 OXIDE_API_PORT="${OXIDE_API_PORT:-8080}"
 ENV_FILE="${ZAP_ENV_FILE:-.oxide-local.env}"
 OXIDE_API_API_KEY="${OXIDE_API_API_KEY:-$(dotenv_key)}"
@@ -57,7 +57,7 @@ docker network create web >/dev/null 2>&1 || true
 # Use the published image when it exists; otherwise build it from this
 # checkout (e.g. an unreleased tag that was never pushed to GHCR).
 IMAGE_REF="$IMAGE_REPO:$IMAGE_TAG"
-if ! docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
+if [ "$IMAGE_TAG" = latest ] || ! docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
   if ! docker pull "$IMAGE_REF"; then
     echo "image $IMAGE_REF not on GHCR, building locally..." >&2
     docker build -t "$IMAGE_REF" .

@@ -185,7 +185,7 @@ pub fn phase1(
     Ok(Phase1 {
         source: PageSource::Image(Arc::new(doc)),
         page_count,
-        pages: selected.into_iter().map(|index| NativePage { index, text: String::new(), ocr: reason, failed: false }).collect(),
+        pages: selected.into_iter().map(|index| NativePage { index, text: String::new(), ocr: reason, failed: false, document: None }).collect(),
         incomplete: false,
         truncated: false,
         legacy_font: false,

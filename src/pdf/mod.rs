@@ -1,6 +1,7 @@
 //! PDF phase 1 (runs on the CPU pool): open → `page_count()` → per page:
 //! classify + legacy-font check + native text. Also `/v1/info` for PDFs.
 
+pub mod document;
 pub mod lang;
 pub mod route;
 
@@ -28,6 +29,7 @@ pub enum Mode {
 
 pub struct PdfJob {
     pub mode: Mode,
+    pub structured: bool,
     /// 1-based page selection as requested; `None` = all pages.
     pub pages: Option<Vec<usize>>,
     pub ocr: OcrMode,
@@ -42,6 +44,7 @@ pub struct NativePage {
     pub text: String,
     pub ocr: Option<OcrReason>,
     pub failed: bool,
+    pub document: Option<document::DocumentPage>,
 }
 
 /// What phase 2 OCRs: a PDF's pages or an image's pages (TIFF frames).
@@ -174,14 +177,23 @@ pub fn phase1(bytes: Bytes, job: &PdfJob) -> Result<Phase1, ApiError> {
         let legacy = job.ocr != OcrMode::Off && page_has_legacy_hindi_font(&doc, idx);
         let class = if job.ocr == OcrMode::Auto && !legacy { doc.classify_page(idx).ok() } else { None };
         let mut plan = route::plan_page(job.ocr, class.map(|c| c.kind), legacy);
-        let native = match &md_opts {
-            Some(opts) => doc.to_markdown(idx, opts),
+        let mut document = if job.structured {
+            Some(document::DocumentPage::new(
+                idx + 1,
+                document::PageFrame::read(&doc, idx).map_err(|e| ApiError::from_pdf(&e))?,
+            ))
+        } else {
+            None
+        };
+        let native = match (&mut document, &md_opts) {
+            (Some(page), _) => page.read_native(&doc, idx).map(|()| page.text.clone()),
+            (_, Some(opts)) => doc.to_markdown(idx, opts),
             // Plain-text reading order (structure tree for tagged PDFs,
             // XY-cut row-major for untagged ones) keeps side-by-side
             // columns on shared lines, so `Invoice No. GST-3425-26` stays
             // together for `/v1/extract/fields`. `extract_text` assembles
             // tables in content-stream order instead, which splits them.
-            None => plain_text_page(&doc, idx),
+            (_, None) => plain_text_page(&doc, idx),
         };
         let (mut text, failed) = match native {
             Ok(t) => (t, false),
@@ -219,7 +231,10 @@ pub fn phase1(bytes: Bytes, job: &PdfJob) -> Result<Phase1, ApiError> {
         if unjudged_layer {
             unjudged.push(pages.len());
         }
-        pages.push(NativePage { index: idx, text, ocr: plan, failed });
+        if text.is_empty() && let Some(page) = &mut document {
+            page.clear();
+        }
+        pages.push(NativePage { index: idx, text, ocr: plan, failed, document });
     }
     // One scanner wrote every page's layer: a page with too few words to
     // judge (a lone formula) takes the verdict of the pages that could be.
@@ -228,6 +243,9 @@ pub fn phase1(bytes: Bytes, job: &PdfJob) -> Result<Phase1, ApiError> {
         for i in unjudged {
             pages[i].ocr = Some(OcrReason::Scanned);
             pages[i].text.clear();
+            if let Some(page) = &mut pages[i].document {
+                page.clear();
+            }
         }
     }
     if junk_layers > 0 {
