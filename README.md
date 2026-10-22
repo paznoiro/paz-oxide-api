@@ -9,7 +9,7 @@ WebP, GIF, BMP, JPEG 2000, PNM, TGA), with OCR in **English, Hindi and Arabic**.
 It ships as **one container**, `oxide-api`. The same request handles everything: Office and
 OpenDocument files and text-layer PDF pages are extracted natively; scanned or legacy-font PDF
 pages and images go through OCR.
-The image is `distroless/cc` with ONNX Runtime 1.28.3, the PaddleOCR models and Liberation fonts for
+The image includes Python 3.12, the pinned Indra CLI, ONNX Runtime 1.28.3, PaddleOCR models and Liberation fonts for
 page rendering: ≈ 103 MB, 55 MB compressed. It runs as UID 65532 with a read-only root filesystem,
 no shell, and a built-in `healthcheck`.
 
@@ -88,7 +88,7 @@ A PDF response (`/v1/extract/text`):
   "text": "Scanned Invoice 4471\nTotal amount due: 1,250.00\n...",
   "char_count": 104, "truncated": false,
   "page_count": 1, "pages_extracted": [1], "incomplete": false,
-  "ocr": { "status": "ocr", "lang": "en", "lang_source": "probe",
+  "ocr": { "status": "ocr", "engine": "paddle", "lang": "en", "lang_source": "probe",
            "pages": [1], "pages_needing_ocr": [], "failed_pages": [],
            "reasons": [{ "page": 1, "reason": "scanned" }] }
 }
@@ -115,6 +115,8 @@ Parameters (query string, multipart parts or JSON keys; never nested):
 | `format` | any | `pdf docx xlsx pptx doc xls ppt odt ods odp png jpeg tiff webp gif bmp jp2 pnm tga` (aliases like `jpg`, `tif`, `xlsm`, `ott` work too): a hint, used only when the content is inconclusive |
 | `pages` | PDF, images | `1-3,5` (1-based; TIFF pages) |
 | `ocr` | PDF, images | `auto` (default), `force`, `off` |
+| `ocr_engine` | PDF, images | `paddle` (default), `indra` |
+| `include_debug` | extraction | `false` (default); `true` returns flow steps and forces JSON |
 | `lang` | PDF, images | `auto` (default), `en`, `hi`, `ar` |
 | `detect_headings` | PDF markdown | `true` (default) / `false` |
 | `clean` | any extraction | `false` (default) / `true`: collapse extra spaces/tabs to one space, trailing whitespace removed, 3+ newlines to one blank line |
@@ -186,6 +188,64 @@ curl -H "$AUTH" -H 'Content-Type: application/json' http://localhost:8080/v1/ext
 - In a JSON body `fields` is the array; as a multipart part or query param it's the array as a JSON
   string. `Accept: text/plain` isn't negotiated here: the response is always JSON.
 
+### Selectable Indra CLI and response diagnostics
+
+All PDF/image extraction endpoints accept `ocr_engine=paddle|indra`. Paddle remains
+the default. `ocr=auto|force|off` and `pages` retain the same meaning. Indra's CLI
+receives only selected OCR pages, as bounded grayscale PNG batches (four pages,
+one decoded page at a time). Native PDF text is retained and hybrid pages are
+merged with OCR using the shared flow. The CLI uses `--format json --mode ocr
+--cores 1 --keep-furniture`; **math is enabled by default**. Disable it with
+`OXIDE_API_INDRA_MATH=false` in the container environment/deployment properties.
+`lang` selects Paddle recognizers; Indra selects scripts itself, so a supplied
+`lang` is listed in `ignored_params`. Script support depends on the pinned Indra
+model set, independent of Paddle's `en,hi,ar` recognizers.
+
+```sh
+curl -H "$AUTH" -F file=@invoice.pdf \
+  'http://localhost:8080/v1/extract/document?ocr_engine=indra&include_debug=true'
+curl -H "$AUTH" -F file=@receipt.png \
+  'http://localhost:8080/v1/extract/markdown?ocr_engine=indra&include_debug=true'
+```
+
+`ocr.engine` identifies the selected backend, including when OCR is skipped.
+Structured output preserves line confidence (null if unavailable) and transforms
+Indra's oriented image boxes back into displayed PDF coordinates. Markdown uses
+Indra's markdown, including LaTeX math when recognized. The structured document
+endpoint remains PDF-only; images use text, markdown or fields endpoints.
+
+With `include_debug=true`, JSON includes `debug.steps`, in execution order:
+
+- `pdf_oxide_parse` (or `image_decode_plan`): page selection/settings and complete
+  native page text, structured blocks where requested, and classification results.
+- `ocr_routing`: selected engine, settings and pages/reasons requiring OCR.
+- `indra_cli` per batch: actual CLI settings, original page numbers and image
+  dimensions, followed by Indra JSON lines with text, boxes, confidence, markdown,
+  layout blocks and internal timings.
+- `ocr_parse`: normalized per-page text/blocks, failures and timed-out pages.
+- `assemble`: merge/cleanup settings and final text or structured pages and metadata.
+
+Each step contains `status`, `elapsed_ms`, `input` and `output`. OCR errors after
+routing also carry the trace in their problem JSON. Binary uploads, base64,
+filenames, credentials, subprocess stderr and local file paths are excluded;
+trace content is returned to the caller and never logged. Inputs/outputs share
+`OXIDE_API_MAX_DEBUG_BYTES`. Oversized sections become
+`{truncated:true, original_bytes:..., preview:...}`, and `debug.truncated` is true.
+`include_debug=true` forces JSON even with a raw-text Accept header. Keep it off
+for ordinary calls because it duplicates extracted document content.
+
+The image packages `indra-ocr==0.3.2` and immutable, checksum-verified model files,
+including math. Python dependencies are hash-locked in `requirements-indra.txt`.
+Models stay read-only, while temporary images use `/tmp` and are deleted after
+inference. Queueing, page preparation and CLI execution share the OCR deadline;
+timeout/cancellation kills the CLI. Indra is independent of Paddle readiness:
+selecting Indra when its CLI/models are missing returns `503 ocr-unavailable`
+when OCR is needed. A non-OCR build still supports native parsing, but cannot
+run Indra. The CLI reloads models per batch; concurrency is bounded separately
+from the existing request admission limit. Verify a running image with
+`python3 scripts/smoke_indra.py --base-url http://127.0.0.1:8080` after exporting
+`OXIDE_API_API_KEY`; use `--expect-math false` for a math-disabled instance.
+
 ### Structured document extraction
 
 `POST /v1/extract/document` accepts **PDF only**, in the same multipart, base64 JSON and raw
@@ -206,7 +266,7 @@ A one-block response (illustrative OCR text and geometry):
   "coordinate_system": {"unit": "pt", "origin": "top_left", "x_direction": "right", "y_direction": "down"},
   "page_count": 1, "pages_extracted": [1], "char_count": 12,
   "truncated": false, "incomplete": false,
-  "ocr": {"status": "ocr", "lang": "en", "lang_source": "param", "pages": [1],
+  "ocr": {"status": "ocr", "engine": "paddle", "lang": "en", "lang_source": "param", "pages": [1],
           "pages_needing_ocr": [], "failed_pages": [], "reasons": [{"page": 1, "reason": "scanned"}]},
   "pages": [{
     "page": 1, "width": 595.44, "height": 842.04, "rotation": 0,
@@ -343,7 +403,12 @@ owner-password-only PDF opens normally.
 | `OXIDE_API_OCR_WORKERS` | `2` | OCR workers, each with its own detector + recognizers |
 | `OXIDE_API_OCR_TIMEOUT_SECS` | `120` | deadline for requests that OCR any page |
 | `OXIDE_API_OCR_LANGUAGES` | `en,hi,ar` | recognizers to load and smoke-test |
-| `OXIDE_API_OCR_MODEL_DIR` | `/models` | model directory (flat upstream layout) |
+| `OXIDE_API_OCR_MODEL_DIR` | `/models` | Paddle model directory (flat upstream layout) |
+| `OXIDE_API_INDRA_CLI` | `indra-ocr` | executable path; invoked directly without a shell |
+| `OXIDE_API_INDRA_MODEL_DIR` | `/models/indra` | pinned local Indra models, including math; no runtime downloads |
+| `OXIDE_API_INDRA_MATH` | `true` | pass `--math`; set `false` to disable math |
+| `OXIDE_API_INDRA_MAX_CONCURRENT` | `1` | concurrent Indra requests; each CLI uses one core |
+| `OXIDE_API_MAX_DEBUG_BYTES` | `1048576` | shared byte budget for opt-in diagnostic inputs and outputs |
 | `ORT_DYLIB_PATH` | `/usr/lib/libonnxruntime.so` | set in the image |
 | `RUST_LOG` | `info,pdf_oxide=error,office_oxide=error,ort=warn` | JSON logs. Request bytes, filenames and extracted text are never logged. Setting it replaces the whole filter, so keep the engine entries |
 
@@ -381,7 +446,7 @@ IMAGE_TAG=0.3.1 docker compose up -d
 Choose the version from the successful workflow summary. `IMAGE_TAG=latest` follows the newest
 successful build when you explicitly pull it. Configure your reverse proxy separately and keep
 `/metrics` private. For local use, `./scripts/local.sh` publishes port 8080 without a proxy.
-The image has no shell; use `docker logs oxide-api` and
+Use `docker logs oxide-api` and
 `docker exec oxide-api oxide-api healthcheck` for diagnostics.
 
 ## Development

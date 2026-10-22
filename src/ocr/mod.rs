@@ -3,6 +3,7 @@
 //! per worker.
 
 pub mod page;
+pub mod indra;
 pub mod pool;
 pub mod smoke;
 pub mod stack;

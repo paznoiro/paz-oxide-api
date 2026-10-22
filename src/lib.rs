@@ -6,6 +6,7 @@ pub mod admission;
 pub mod auth;
 pub mod blocking;
 pub mod config;
+pub mod debug;
 pub mod detect;
 pub mod error;
 pub mod fields;
@@ -73,6 +74,8 @@ pub struct AppState {
     pub started: Instant,
     #[cfg(feature = "ocr")]
     pub ocr: Option<Arc<ocr::OcrService>>,
+    #[cfg(feature = "ocr")]
+    pub indra: ocr::indra::IndraService,
 }
 
 /// Builds shared state and starts background work (OCR workers). Readiness
@@ -107,6 +110,8 @@ pub fn build_state(cfg: Config) -> Arc<AppState> {
         started: Instant::now(),
         #[cfg(feature = "ocr")]
         ocr,
+        #[cfg(feature = "ocr")]
+        indra: ocr::indra::IndraService::new(&cfg),
         cfg,
     })
 }
@@ -210,6 +215,10 @@ async fn version(State(st): State<Arc<AppState>>) -> Response {
     #[cfg(not(feature = "ocr"))]
     let ocr = json!({"compiled": false, "status": "unavailable"});
     let c = &st.cfg;
+    #[cfg(feature = "ocr")]
+    let indra_available = st.indra.available();
+    #[cfg(not(feature = "ocr"))]
+    let indra_available = false;
     no_store(
         axum::Json(json!({
             "name": "oxide-api",
@@ -223,12 +232,19 @@ async fn version(State(st): State<Arc<AppState>>) -> Response {
                 "process_timeout_secs": c.process_timeout.as_secs(),
                 "ocr_timeout_secs": c.ocr_timeout.as_secs(),
                 "max_text_chars": c.max_text_chars,
+                "max_debug_bytes": c.max_debug_bytes,
                 "max_pdf_pages": c.max_pdf_pages,
                 "max_image_pixels": c.max_image_pixels,
                 "cpu_threads": st.cpu.threads(),
             },
             "auth": c.api_key.is_some(),
             "ocr": ocr,
+            "indra": {
+                "compiled": cfg!(feature = "ocr"),
+                "available": indra_available,
+                "math": c.indra_math,
+                "max_concurrent": c.indra_max_concurrent,
+            },
         }))
         .into_response(),
     )

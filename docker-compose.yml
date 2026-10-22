@@ -49,12 +49,15 @@ services:
           cpus: 0.25
           memory: 256M
 
-    # --- security hardening (distroless, non-root, no writes needed) ---
+    # --- security hardening (non-root, read-only application and models) ---
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Indra's selected page images are temporary and removed after inference.
+    tmpfs:
+      - /tmp
 
     ulimits:
       nofile:

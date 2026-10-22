@@ -15,7 +15,8 @@ path = "src/main.rs"
 pdf_oxide    = "=0.3.78"
 office_oxide = "=0.1.13"          # the version pdf_oxide resolves; one copy in the graph
 axum         = { version = "0.8", features = ["multipart"] }
-tokio        = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "io-util"] }
+tokio        = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "io-util", "process"] }
+tempfile     = "3"
 tower        = { version = "0.5", features = ["util"] }
 tower-http   = { version = "0.6", features = ["trace", "request-id", "sensitive-headers", "set-header", "util"] }
 rayon        = "1"

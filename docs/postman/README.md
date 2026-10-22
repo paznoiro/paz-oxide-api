@@ -23,6 +23,7 @@ use `noauth`.
 | `documents (structured)` | digital, scanned and mixed PDF pages to structured JSON; fixture requests run as-is |
 | `images (OCR)` | an image to text, a sideways phone photo (EXIF rotation), page 2 of a multi-page TIFF, raw markdown from an Arabic WebP, image info |
 | `opendocument` | ODT / ODS / ODP to markdown, spreadsheet info |
+| `indra (CLI + debug)` | PDF/image Indra OCR with default math and ordered textual flow traces |
 | `ops` | health, readiness, version, metrics, OpenAPI |
 
 Supported files: PDF; DOCX, XLSX, PPTX, DOC, XLS, PPT; ODT, ODS, ODP;

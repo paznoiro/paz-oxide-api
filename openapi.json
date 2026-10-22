@@ -4,7 +4,7 @@
     "title": "Oxide API",
     "version": "0.3.1",
     "summary": "Text, markdown and structured PDF extraction, with OCR.",
-    "description": "One HTTP API that extracts `text` and `markdown` from **PDF**, **Office** (DOCX, XLSX, PPTX,\nDOC, XLS, PPT), **OpenDocument** (ODT, ODS, ODP) and **image** files (PNG, JPEG, TIFF, WebP,\nGIF, BMP, JPEG 2000, PNM, TGA). The file type is detected from the content, so one route\nserves every format.\n\nPDF pages are classified one by one: pages with a usable text layer are extracted natively,\nand scanned or legacy-font pages go through OCR (English, Hindi, Arabic) in the same request.\nImages go straight to OCR, one page per TIFF page; EXIF orientation is honoured. HEIC, AVIF\nand JPEG XL are recognized but not supported.\n\n**Input.** Send the document as multipart (`file=<binary>`), as JSON\n(`{\"file_base64\": \"...\"}`), or as the raw request body. Parameters are top-level multipart\nparts, JSON keys, or query parameters; body parameters override query parameters. Parameters\nthat don't apply to the detected document kind are ignored and listed in `ignored_params`.\n\n**Output.** JSON by default. `Accept: text/plain` (text endpoint) or `Accept: text/markdown`\n(markdown endpoint) returns the raw text, with metadata in `X-Oxide-*` headers.\n\n**Structured PDF.** `/v1/extract/document` returns page text and ordered, positioned blocks\nfor digital, scanned and mixed PDFs. Native font details and OCR recognizer confidence are\nretained; unavailable confidence is null. This is input for downstream LLM schema mapping;\nthe service does not call an LLM or accept a target JSON schema.\n\n**Fields.** `/v1/extract/fields` reads the document exactly as the text endpoint does, then\nruns a list of named regular-expression fields over that one text and returns each value (or\n`null`). Its `fields` (and `text`) are taken whole, the one exception to \"never nested\".\n\n**Limits.** 32 MiB request body (for JSON this counts the base64 text). 8 requests are\nprocessed at once per container; others wait up to 1 s for a slot, then get `429`.\nNative extraction has a 30 s deadline, requests that OCR any page 120 s, both measured from\nadmission. A PDF or image that runs out of time returns the pages done so far with\n`incomplete: true`. Images are limited to 64 megapixels per page.\n\nErrors use RFC 9457 `application/problem+json`.\n",
+    "description": "One HTTP API that extracts `text` and `markdown` from **PDF**, **Office** (DOCX, XLSX, PPTX,\nDOC, XLS, PPT), **OpenDocument** (ODT, ODS, ODP) and **image** files (PNG, JPEG, TIFF, WebP,\nGIF, BMP, JPEG 2000, PNM, TGA). The file type is detected from the content, so one route\nserves every format.\n\nPDF pages are classified one by one: pages with a usable text layer are extracted natively,\nand scanned or legacy-font pages go through OCR (English, Hindi, Arabic) in the same request.\nImages go straight to OCR, one page per TIFF page; EXIF orientation is honoured. HEIC, AVIF\nand JPEG XL are recognized but not supported.\n\n**Input.** Send the document as multipart (`file=<binary>`), as JSON\n(`{\"file_base64\": \"...\"}`), or as the raw request body. Parameters are top-level multipart\nparts, JSON keys, or query parameters; body parameters override query parameters. Parameters\nthat don't apply to the detected document kind are ignored and listed in `ignored_params`.\n\n**Output.** JSON by default. `Accept: text/plain` (text endpoint) or `Accept: text/markdown`\n(markdown endpoint) returns the raw text, with metadata in `X-Oxide-*` headers.\n\n**OCR engines.** Select `ocr_engine=paddle|indra` (default Paddle). Indra runs\nlocally as a CLI with one core and bounded batches. Math is on by default and\ncan be disabled with `OXIDE_API_INDRA_MATH=false`. `include_debug=true` returns\nordered flow steps and textual input/output in JSON, bounded by the configured\ndebug byte budget. No binary uploads or credentials are returned in debug.\n\n**Structured PDF.** `/v1/extract/document` returns page text and ordered, positioned blocks\nfor digital, scanned and mixed PDFs. Native font details and OCR recognizer confidence are\nretained; unavailable confidence is null. This is input for downstream LLM schema mapping;\nthe service does not call an LLM or accept a target JSON schema.\n\n**Fields.** `/v1/extract/fields` reads the document exactly as the text endpoint does, then\nruns a list of named regular-expression fields over that one text and returns each value (or\n`null`). Its `fields` (and `text`) are taken whole, the one exception to \"never nested\".\n\n**Limits.** 32 MiB request body (for JSON this counts the base64 text). 8 requests are\nprocessed at once per container; others wait up to 1 s for a slot, then get `429`.\nNative extraction has a 30 s deadline, requests that OCR any page 120 s, both measured from\nadmission. A PDF or image that runs out of time returns the pages done so far with\n`incomplete: true`. Images are limited to 64 megapixels per page.\n\nErrors use RFC 9457 `application/problem+json`.\n",
     "license": {
       "name": "MIT OR Apache-2.0"
     }
@@ -49,10 +49,16 @@
             "$ref": "#/components/parameters/ocr"
           },
           {
+            "$ref": "#/components/parameters/ocr_engine"
+          },
+          {
             "$ref": "#/components/parameters/lang"
           },
           {
             "$ref": "#/components/parameters/clean"
+          },
+          {
+            "$ref": "#/components/parameters/include_debug"
           },
           {
             "$ref": "#/components/parameters/filename"
@@ -147,10 +153,16 @@
             "$ref": "#/components/parameters/ocr"
           },
           {
+            "$ref": "#/components/parameters/ocr_engine"
+          },
+          {
             "$ref": "#/components/parameters/lang"
           },
           {
             "$ref": "#/components/parameters/clean"
+          },
+          {
+            "$ref": "#/components/parameters/include_debug"
           },
           {
             "$ref": "#/components/parameters/filename"
@@ -221,6 +233,9 @@
             "$ref": "#/components/parameters/ocr"
           },
           {
+            "$ref": "#/components/parameters/ocr_engine"
+          },
+          {
             "$ref": "#/components/parameters/lang"
           },
           {
@@ -228,6 +243,9 @@
           },
           {
             "$ref": "#/components/parameters/clean"
+          },
+          {
+            "$ref": "#/components/parameters/include_debug"
           },
           {
             "$ref": "#/components/parameters/filename"
@@ -322,10 +340,16 @@
             "$ref": "#/components/parameters/ocr"
           },
           {
+            "$ref": "#/components/parameters/ocr_engine"
+          },
+          {
             "$ref": "#/components/parameters/lang"
           },
           {
             "$ref": "#/components/parameters/clean"
+          },
+          {
+            "$ref": "#/components/parameters/include_debug"
           },
           {
             "$ref": "#/components/parameters/include_text"
@@ -377,6 +401,7 @@
                   "incomplete": false,
                   "ocr": {
                     "status": "ocr",
+                    "engine": "paddle",
                     "lang": "en",
                     "lang_source": "probe",
                     "pages": [
@@ -732,11 +757,33 @@
           "default": "auto"
         }
       },
+      "ocr_engine": {
+        "name": "ocr_engine",
+        "in": "query",
+        "description": "PDF and images. Select PaddleOCR or the Indra CLI. Paddle is the default.\nThe selected engine obeys ocr=auto|force|off and pages. Indra uses automatic\nscript selection; lang is ignored and listed in ignored_params. Indra math\nis enabled by default; OXIDE_API_INDRA_MATH=false disables it server-wide.\nA needed but unavailable Indra installation returns 503 ocr-unavailable.\n",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "paddle",
+            "indra"
+          ],
+          "default": "paddle"
+        }
+      },
+      "include_debug": {
+        "name": "include_debug",
+        "in": "query",
+        "description": "Return debug.steps with ordered parser/routing/OCR input and output, status\nand elapsed_ms. Indra includes its CLI JSON and settings. Upload bytes,\nfilenames, credentials, local paths and subprocess stderr are excluded.\nPayloads share OXIDE_API_MAX_DEBUG_BYTES (default 1048576); omitted data\ncarries truncated=true, original_bytes and a preview. debug.truncated marks\nany omission. This option forces JSON even when Accept requests raw text.\nOff by default. Diagnostics contain document text and are never logged.\n",
+        "schema": {
+          "type": "boolean",
+          "default": false
+        }
+      },
       "lang": {
         "name": "lang",
         "in": "query",
         "required": false,
-        "description": "PDF and images. OCR language. `auto` resolves once per document: legacy Hindi font →\n`hi`; else the native text's script; else a confidence probe on the first OCR page; else\n`en`.\n",
+        "description": "PDF and images. PaddleOCR language (ignored by Indra). `auto` resolves once per document: legacy Hindi font →\n`hi`; else the native text's script; else a confidence probe on the first OCR page; else\n`en`.\n",
         "schema": {
           "type": "string",
           "enum": [
@@ -813,6 +860,14 @@
                 "ocr": {
                   "type": "string"
                 },
+                "ocr_engine": {
+                  "type": "string",
+                  "enum": [
+                    "paddle",
+                    "indra"
+                  ],
+                  "default": "paddle"
+                },
                 "lang": {
                   "type": "string"
                 },
@@ -820,6 +875,9 @@
                   "type": "string"
                 },
                 "clean": {
+                  "type": "string"
+                },
+                "include_debug": {
                   "type": "string"
                 }
               }
@@ -845,6 +903,14 @@
                 "ocr": {
                   "type": "string"
                 },
+                "ocr_engine": {
+                  "type": "string",
+                  "enum": [
+                    "paddle",
+                    "indra"
+                  ],
+                  "default": "paddle"
+                },
                 "lang": {
                   "type": "string"
                 },
@@ -852,6 +918,9 @@
                   "type": "boolean"
                 },
                 "clean": {
+                  "type": "boolean"
+                },
+                "include_debug": {
                   "type": "boolean"
                 },
                 "filename": {
@@ -908,10 +977,21 @@
                 "ocr": {
                   "type": "string"
                 },
+                "ocr_engine": {
+                  "type": "string",
+                  "enum": [
+                    "paddle",
+                    "indra"
+                  ],
+                  "default": "paddle"
+                },
                 "lang": {
                   "type": "string"
                 },
                 "clean": {
+                  "type": "boolean"
+                },
+                "include_debug": {
                   "type": "boolean"
                 },
                 "include_text": {
@@ -980,10 +1060,21 @@
                 "ocr": {
                   "type": "string"
                 },
+                "ocr_engine": {
+                  "type": "string",
+                  "enum": [
+                    "paddle",
+                    "indra"
+                  ],
+                  "default": "paddle"
+                },
                 "lang": {
                   "type": "string"
                 },
                 "clean": {
+                  "type": "string"
+                },
+                "include_debug": {
                   "type": "string"
                 },
                 "include_text": {
@@ -1085,7 +1176,7 @@
         }
       },
       "Draining": {
-        "description": "The instance is shutting down.",
+        "description": "The instance is shutting down, or a requested Indra CLI/model installation is unavailable (ocr-unavailable).",
         "content": {
           "application/problem+json": {
             "schema": {
@@ -1096,6 +1187,66 @@
       }
     },
     "schemas": {
+      "DebugTrace": {
+        "type": "object",
+        "required": [
+          "steps",
+          "truncated"
+        ],
+        "properties": {
+          "truncated": {
+            "type": "boolean"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "step",
+                "status",
+                "elapsed_ms",
+                "input",
+                "output"
+              ],
+              "properties": {
+                "step": {
+                  "type": "string",
+                  "examples": [
+                    "pdf_oxide_parse",
+                    "image_decode_plan",
+                    "office_parse",
+                    "ocr_routing",
+                    "indra_cli",
+                    "ocr_parse",
+                    "assemble"
+                  ]
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "ok",
+                    "skipped",
+                    "partial",
+                    "unavailable",
+                    "failed",
+                    "timeout"
+                  ]
+                },
+                "elapsed_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "input": {
+                  "description": "Stage settings and input metadata or text; bounded when oversized."
+                },
+                "output": {
+                  "description": "Full textual stage results within the shared debug budget."
+                }
+              }
+            }
+          }
+        }
+      },
       "FormatSource": {
         "type": "string",
         "enum": [
@@ -1122,6 +1273,9 @@
           "pages"
         ],
         "properties": {
+          "debug": {
+            "$ref": "#/components/schemas/DebugTrace"
+          },
           "schema_version": {
             "type": "string",
             "const": "1.0"
@@ -1287,7 +1441,11 @@
               "header",
               "footer",
               "page_number",
-              "artifact"
+              "artifact",
+              "table",
+              "caption",
+              "footnote",
+              "list"
             ]
           },
           "text": {
@@ -1393,6 +1551,9 @@
           "ocr"
         ],
         "properties": {
+          "debug": {
+            "$ref": "#/components/schemas/DebugTrace"
+          },
           "kind": {
             "type": "string",
             "const": "pdf"
@@ -1452,11 +1613,20 @@
         "type": "object",
         "required": [
           "status",
+          "engine",
           "pages",
           "pages_needing_ocr",
           "failed_pages"
         ],
         "properties": {
+          "engine": {
+            "type": "string",
+            "enum": [
+              "paddle",
+              "indra"
+            ],
+            "description": "Selected OCR backend; pages lists actual OCR use."
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -1546,6 +1716,9 @@
           "truncated"
         ],
         "properties": {
+          "debug": {
+            "$ref": "#/components/schemas/DebugTrace"
+          },
           "kind": {
             "type": "string",
             "const": "office"
@@ -1600,6 +1773,9 @@
           "ocr"
         ],
         "properties": {
+          "debug": {
+            "$ref": "#/components/schemas/DebugTrace"
+          },
           "kind": {
             "type": "string",
             "const": "image"
@@ -2016,6 +2192,9 @@
         ],
         "description": "`kind` is the document's, or `text` when `text` was sent; a PDF or image adds the same\npage and OCR details as its text extraction.\n",
         "properties": {
+          "debug": {
+            "$ref": "#/components/schemas/DebugTrace"
+          },
           "kind": {
             "type": "string",
             "enum": [
@@ -2131,6 +2310,9 @@
           "detail"
         ],
         "properties": {
+          "debug": {
+            "$ref": "#/components/schemas/DebugTrace"
+          },
           "type": {
             "type": "string",
             "example": "/problems/encrypted-document"
@@ -2182,6 +2364,23 @@
           "ocr"
         ],
         "properties": {
+          "indra": {
+            "type": "object",
+            "properties": {
+              "compiled": {
+                "type": "boolean"
+              },
+              "available": {
+                "type": "boolean"
+              },
+              "math": {
+                "type": "boolean"
+              },
+              "max_concurrent": {
+                "type": "integer"
+              }
+            }
+          },
           "name": {
             "type": "string"
           },

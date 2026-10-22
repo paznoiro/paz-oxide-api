@@ -22,6 +22,12 @@ info:
     **Output.** JSON by default. `Accept: text/plain` (text endpoint) or `Accept: text/markdown`
     (markdown endpoint) returns the raw text, with metadata in `X-Oxide-*` headers.
 
+    **OCR engines.** Select `ocr_engine=paddle|indra` (default Paddle). Indra runs
+    locally as a CLI with one core and bounded batches. Math is on by default and
+    can be disabled with `OXIDE_API_INDRA_MATH=false`. `include_debug=true` returns
+    ordered flow steps and textual input/output in JSON, bounded by the configured
+    debug byte budget. No binary uploads or credentials are returned in debug.
+
     **Structured PDF.** `/v1/extract/document` returns page text and ordered, positioned blocks
     for digital, scanned and mixed PDFs. Native font details and OCR recognizer confidence are
     retained; unavailable confidence is null. This is input for downstream LLM schema mapping;
@@ -62,8 +68,10 @@ paths:
         - $ref: '#/components/parameters/format'
         - $ref: '#/components/parameters/pages'
         - $ref: '#/components/parameters/ocr'
+        - $ref: '#/components/parameters/ocr_engine'
         - $ref: '#/components/parameters/lang'
         - $ref: '#/components/parameters/clean'
+        - $ref: '#/components/parameters/include_debug'
         - $ref: '#/components/parameters/filename'
       requestBody:
         $ref: '#/components/requestBodies/Document'
@@ -131,8 +139,10 @@ paths:
         - $ref: '#/components/parameters/format'
         - $ref: '#/components/parameters/pages'
         - $ref: '#/components/parameters/ocr'
+        - $ref: '#/components/parameters/ocr_engine'
         - $ref: '#/components/parameters/lang'
         - $ref: '#/components/parameters/clean'
+        - $ref: '#/components/parameters/include_debug'
         - $ref: '#/components/parameters/filename'
       requestBody:
         $ref: '#/components/requestBodies/Document'
@@ -165,9 +175,11 @@ paths:
         - $ref: '#/components/parameters/format'
         - $ref: '#/components/parameters/pages'
         - $ref: '#/components/parameters/ocr'
+        - $ref: '#/components/parameters/ocr_engine'
         - $ref: '#/components/parameters/lang'
         - $ref: '#/components/parameters/detect_headings'
         - $ref: '#/components/parameters/clean'
+        - $ref: '#/components/parameters/include_debug'
         - $ref: '#/components/parameters/filename'
       requestBody:
         $ref: '#/components/requestBodies/Document'
@@ -250,8 +262,10 @@ paths:
         - $ref: '#/components/parameters/format'
         - $ref: '#/components/parameters/pages'
         - $ref: '#/components/parameters/ocr'
+        - $ref: '#/components/parameters/ocr_engine'
         - $ref: '#/components/parameters/lang'
         - $ref: '#/components/parameters/clean'
+        - $ref: '#/components/parameters/include_debug'
         - $ref: '#/components/parameters/include_text'
         - $ref: '#/components/parameters/filename'
       requestBody:
@@ -279,7 +293,7 @@ paths:
                 page_count: 1
                 pages_extracted: [1]
                 incomplete: false
-                ocr: { status: ocr, lang: en, lang_source: probe, pages: [1], pages_needing_ocr: [], failed_pages: [], reasons: [{ page: 1, reason: scanned }] }
+                ocr: { status: ocr, engine: paddle, lang: en, lang_source: probe, pages: [1], pages_needing_ocr: [], failed_pages: [], reasons: [{ page: 1, reason: scanned }] }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '408': { $ref: '#/components/responses/UploadTimeout' }
@@ -463,12 +477,34 @@ components:
         type: string
         enum: [auto, force, 'off']
         default: auto
+    ocr_engine:
+      name: ocr_engine
+      in: query
+      description: |
+        PDF and images. Select PaddleOCR or the Indra CLI. Paddle is the default.
+        The selected engine obeys ocr=auto|force|off and pages. Indra uses automatic
+        script selection; lang is ignored and listed in ignored_params. Indra math
+        is enabled by default; OXIDE_API_INDRA_MATH=false disables it server-wide.
+        A needed but unavailable Indra installation returns 503 ocr-unavailable.
+      schema: { type: string, enum: [paddle, indra], default: paddle }
+    include_debug:
+      name: include_debug
+      in: query
+      description: |
+        Return debug.steps with ordered parser/routing/OCR input and output, status
+        and elapsed_ms. Indra includes its CLI JSON and settings. Upload bytes,
+        filenames, credentials, local paths and subprocess stderr are excluded.
+        Payloads share OXIDE_API_MAX_DEBUG_BYTES (default 1048576); omitted data
+        carries truncated=true, original_bytes and a preview. debug.truncated marks
+        any omission. This option forces JSON even when Accept requests raw text.
+        Off by default. Diagnostics contain document text and are never logged.
+      schema: { type: boolean, default: false }
     lang:
       name: lang
       in: query
       required: false
       description: |
-        PDF and images. OCR language. `auto` resolves once per document: legacy Hindi font →
+        PDF and images. PaddleOCR language (ignored by Indra). `auto` resolves once per document: legacy Hindi font →
         `hi`; else the native text's script; else a confidence probe on the first OCR page; else
         `en`.
       schema:
@@ -528,9 +564,11 @@ components:
               format: { type: string }
               pages: { type: string }
               ocr: { type: string }
+              ocr_engine: { type: string, enum: [paddle, indra], default: paddle }
               lang: { type: string }
               detect_headings: { type: string }
               clean: { type: string }
+              include_debug: { type: string }
         application/json:
           schema:
             type: object
@@ -542,9 +580,11 @@ components:
               format: { type: string }
               pages: { type: string }
               ocr: { type: string }
+              ocr_engine: { type: string, enum: [paddle, indra], default: paddle }
               lang: { type: string }
               detect_headings: { type: boolean }
               clean: { type: boolean }
+              include_debug: { type: boolean }
               filename: { type: string }
             additionalProperties:
               description: Parameters are top-level scalars, never nested.
@@ -580,8 +620,10 @@ components:
               format: { type: string }
               pages: { type: string }
               ocr: { type: string }
+              ocr_engine: { type: string, enum: [paddle, indra], default: paddle }
               lang: { type: string }
               clean: { type: boolean }
+              include_debug: { type: boolean }
               include_text: { type: boolean }
               filename: { type: string }
           example:
@@ -615,8 +657,10 @@ components:
               format: { type: string }
               pages: { type: string }
               ocr: { type: string }
+              ocr_engine: { type: string, enum: [paddle, indra], default: paddle }
               lang: { type: string }
               clean: { type: string }
+              include_debug: { type: string }
               include_text: { type: string }
         application/octet-stream:
           schema:
@@ -671,11 +715,27 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     Draining:
-      description: The instance is shutting down.
+      description: The instance is shutting down, or a requested Indra CLI/model installation is unavailable (ocr-unavailable).
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
   schemas:
+    DebugTrace:
+      type: object
+      required: [steps, truncated]
+      properties:
+        truncated: { type: boolean }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [step, status, elapsed_ms, input, output]
+            properties:
+              step: { type: string, examples: [pdf_oxide_parse, image_decode_plan, office_parse, ocr_routing, indra_cli, ocr_parse, assemble] }
+              status: { type: string, enum: [ok, skipped, partial, unavailable, failed, timeout] }
+              elapsed_ms: { type: integer, minimum: 0 }
+              input: { description: Stage settings and input metadata or text; bounded when oversized. }
+              output: { description: Full textual stage results within the shared debug budget. }
     FormatSource:
       type: string
       enum: [sniff, param, filename]
@@ -684,6 +744,7 @@ components:
       type: object
       required: [schema_version, kind, format, format_source, coordinate_system, char_count, truncated, page_count, pages_extracted, incomplete, ocr, pages]
       properties:
+        debug: { $ref: '#/components/schemas/DebugTrace' }
         schema_version: { type: string, const: '1.0' }
         kind: { type: string, const: pdf }
         format: { type: string, const: pdf }
@@ -732,7 +793,7 @@ components:
       properties:
         id: { type: string, description: 'Page-scoped citation ID, e.g. p1-b0; deterministic for the same extraction, not a persistent document ID.' }
         reading_order: { type: integer, minimum: 0, description: Zero-based position in this page's blocks array. }
-        kind: { type: string, enum: [text, heading, header, footer, page_number, artifact] }
+        kind: { type: string, enum: [text, heading, header, footer, page_number, artifact, table, caption, footnote, list] }
         text: { type: string }
         bbox:
           oneOf:
@@ -766,6 +827,7 @@ components:
       type: object
       required: [kind, format, format_source, text, char_count, truncated, page_count, pages_extracted, incomplete, ocr]
       properties:
+        debug: { $ref: '#/components/schemas/DebugTrace' }
         kind: { type: string, const: pdf }
         format: { type: string, const: pdf }
         format_source: { $ref: '#/components/schemas/FormatSource' }
@@ -791,8 +853,9 @@ components:
           description: Parameters that don't apply to this document (omitted when empty).
     OcrInfo:
       type: object
-      required: [status, pages, pages_needing_ocr, failed_pages]
+      required: [status, engine, pages, pages_needing_ocr, failed_pages]
       properties:
+        engine: { type: string, enum: [paddle, indra], description: Selected OCR backend; pages lists actual OCR use. }
         status:
           type: string
           enum: [native, ocr, hybrid, unavailable, 'off']
@@ -833,6 +896,7 @@ components:
       type: object
       required: [kind, format, format_source, text, char_count, truncated]
       properties:
+        debug: { $ref: '#/components/schemas/DebugTrace' }
         kind: { type: string, const: office }
         format:
           type: string
@@ -849,6 +913,7 @@ components:
       description: Same shape as a PDF extraction; every page comes from OCR.
       required: [kind, format, format_source, text, char_count, truncated, page_count, pages_extracted, incomplete, ocr]
       properties:
+        debug: { $ref: '#/components/schemas/DebugTrace' }
         kind: { type: string, const: image }
         format:
           type: string
@@ -1043,6 +1108,7 @@ components:
         `kind` is the document's, or `text` when `text` was sent; a PDF or image adds the same
         page and OCR details as its text extraction.
       properties:
+        debug: { $ref: '#/components/schemas/DebugTrace' }
         kind:
           type: string
           enum: [pdf, office, image, text]
@@ -1100,6 +1166,7 @@ components:
       description: RFC 9457 problem details.
       required: [type, title, status, detail]
       properties:
+        debug: { $ref: '#/components/schemas/DebugTrace' }
         type: { type: string, example: /problems/encrypted-document }
         title: { type: string }
         status: { type: integer }
@@ -1119,6 +1186,13 @@ components:
       type: object
       required: [name, version, engines, limits, ocr]
       properties:
+        indra:
+          type: object
+          properties:
+            compiled: { type: boolean }
+            available: { type: boolean }
+            math: { type: boolean }
+            max_concurrent: { type: integer }
         name: { type: string }
         version: { type: string }
         engines:

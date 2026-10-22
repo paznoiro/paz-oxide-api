@@ -3,6 +3,31 @@
 use pdf_oxide::extractors::auto::PageKind;
 use serde::Serialize;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrEngine {
+    #[default]
+    Paddle,
+    Indra,
+}
+
+impl OcrEngine {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "paddle" => Some(Self::Paddle),
+            "indra" => Some(Self::Indra),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Paddle => "paddle",
+            Self::Indra => "indra",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OcrMode {
     Auto,

@@ -33,6 +33,8 @@ pub struct OcrJob {
     pub accept_small_image: bool,
     /// Full-page rendering and positioned results for document extraction.
     pub structured: bool,
+    /// Include recognizer boxes in opt-in diagnostics without changing routing.
+    pub include_blocks: bool,
     pub lang: LangPlan,
     pub permit: JobPermit,
     pub reply: oneshot::Sender<Result<OcrPageResult, String>>,
@@ -276,7 +278,7 @@ fn worker(
         metrics::histogram!("oxide_ocr_page_duration_seconds", "lang" => lang_label).record(elapsed.as_secs_f64());
         let OcrJob { reply, permit, .. } = job;
         let _ = reply.send(out.map(|(p, probed)| OcrPageResult {
-            text: p.text, blocks: if job.structured { p.blocks } else { Vec::new() }, lang: p.lang, probed, elapsed,
+            text: p.text, blocks: if job.structured || job.include_blocks { p.blocks } else { Vec::new() }, lang: p.lang, probed, elapsed,
         }));
         drop(permit);
     }

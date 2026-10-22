@@ -1,0 +1,2 @@
+# Match the existing zap-idoc-xtract integration and its JSON/rotation contract.
+indra-ocr==0.3.2

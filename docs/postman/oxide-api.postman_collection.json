@@ -28,6 +28,100 @@
   ],
   "item": [
     {
+      "name": "indra (CLI + debug)",
+      "description": "Selectable Indra OCR with default math and ordered response traces.",
+      "item": [
+        {
+          "name": "Indra PDF with math and flow debug",
+          "request": {
+            "method": "POST",
+            "description": "Runs the local Indra CLI. Math defaults on; set OXIDE_API_INDRA_MATH=false on the server to disable it. debug.steps contains native parser output, routing, CLI JSON and normalized OCR results. Binary uploads and credentials are excluded.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/document?ocr_engine=indra&include_debug=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "extract",
+                "document"
+              ],
+              "query": [
+                {
+                  "key": "ocr_engine",
+                  "value": "indra"
+                },
+                {
+                  "key": "include_debug",
+                  "value": "true"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "tests/fixtures/scan_en.pdf"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Indra image with math and flow debug",
+          "request": {
+            "method": "POST",
+            "description": "Runs the local Indra CLI. Math defaults on; set OXIDE_API_INDRA_MATH=false on the server to disable it. debug.steps contains native parser output, routing, CLI JSON and normalized OCR results. Binary uploads and credentials are excluded.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/extract/text?ocr_engine=indra&include_debug=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "extract",
+                "text"
+              ],
+              "query": [
+                {
+                  "key": "ocr_engine",
+                  "value": "indra"
+                },
+                {
+                  "key": "include_debug",
+                  "value": "true"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "tests/fixtures/scan_en.png"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "documents (structured)",
       "description": "PDF extraction for downstream LLM schema mapping; no LLM calls. Fixture requests are ready to run from the repository root.",
       "item": [

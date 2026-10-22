@@ -10,19 +10,20 @@ use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{COMMON_PARAMS, await_job, format_param, parse_bool};
 use crate::AppState;
 use crate::admission::Admitted;
 use crate::detect::{self, DocKind, FormatSource};
+use crate::debug::DebugTrace;
 use crate::error::ApiError;
 use crate::fields::{self, Extracted, Field, FieldValues};
 use crate::io::{self, Params, Shape};
 use crate::office::OfficeFormat;
 use crate::pdf::document::{Block, DocumentPage};
 use crate::pdf::lang::{Lang, LangParam, LangSource};
-use crate::pdf::route::{OcrMode, OcrReason};
+use crate::pdf::route::{OcrEngine, OcrMode, OcrReason};
 use crate::pdf::{self, Mode, Phase1};
 use crate::raster::ImageFormat;
 use crate::respond::{self, Engine, Output, Timing};
@@ -68,19 +69,22 @@ struct ExtractParams {
     format: Option<DocKind>,
     pages: Option<Vec<usize>>,
     ocr: OcrMode,
+    ocr_engine: OcrEngine,
     lang: LangParam,
     detect_headings: bool,
     clean: bool,
     include_text: bool,
     provided: Vec<String>,
     structured: bool,
+    markdown: bool,
+    include_debug: bool,
 }
 
 /// Params for paged kinds (PDF, images).
-const PAGED_PARAMS: [&str; 3] = ["pages", "ocr", "lang"];
+const PAGED_PARAMS: [&str; 4] = ["pages", "ocr", "lang", "ocr_engine"];
 
 /// Params that apply to every extraction (any kind, every endpoint).
-const EXTRACT_PARAMS: [&str; 1] = ["clean"];
+const EXTRACT_PARAMS: [&str; 2] = ["clean", "include_debug"];
 
 /// Params of `/v1/extract/fields` alone.
 const FIELDS_PARAMS: [&str; 1] = ["include_text"];
@@ -102,12 +106,16 @@ impl ExtractParams {
             .transpose()?
             .unwrap_or(LangParam::Auto);
         let detect_headings = p.get("detect_headings").map(|v| parse_bool("detect_headings", v)).transpose()?.unwrap_or(true);
+        let ocr_engine = p.get("ocr_engine")
+            .map(|v| OcrEngine::parse(v).ok_or_else(|| ApiError::invalid_param("ocr_engine", v, "paddle, indra")))
+            .transpose()?.unwrap_or_default();
+        let include_debug = p.get("include_debug").map(|v| parse_bool("include_debug", v)).transpose()?.unwrap_or(false);
         let clean = p.get("clean").map(|v| parse_bool("clean", v)).transpose()?.unwrap_or(false);
         let include_text = match ep {
             Endpoint::Fields => p.get("include_text").map(|v| parse_bool("include_text", v)).transpose()?.unwrap_or(false),
             Endpoint::Text | Endpoint::Markdown | Endpoint::Document => false,
         };
-        Ok(Self { format: format_param(p)?, pages, ocr, lang, detect_headings, clean, include_text, provided: p.keys().cloned().collect(), structured: ep == Endpoint::Document })
+        Ok(Self { format: format_param(p)?, pages, ocr, ocr_engine, lang, detect_headings, clean, include_text, provided: p.keys().cloned().collect(), structured: ep == Endpoint::Document, markdown: ep == Endpoint::Markdown, include_debug })
     }
 
     /// Params that don't apply to the detected kind (or aren't known at all).
@@ -117,6 +125,9 @@ impl ExtractParams {
             .iter()
             .filter(|k| {
                 let k = k.as_str();
+                if k == "lang" && self.ocr_engine == OcrEngine::Indra {
+                    return true; // The CLI selects scripts automatically.
+                }
                 let applies = EXTRACT_PARAMS.contains(&k)
                     || (ep == Endpoint::Fields && FIELDS_PARAMS.contains(&k))
                     || kind.is_some_and(|kind| {
@@ -141,6 +152,7 @@ async fn extract(st: Arc<AppState>, mut req: Request, ep: Endpoint) -> Result<Re
         .await
         .map_err(|_| ApiError::body_timeout())??;
     let params = ExtractParams::parse(&input.params, ep)?;
+    let output = if params.include_debug { Output::Json } else { output };
     let detected = detect::detect(&input.bytes, params.format, input.filename.as_deref())?;
     if ep == Endpoint::Document && detected.kind != DocKind::Pdf {
         return Err(ApiError::unsupported(
@@ -153,7 +165,7 @@ async fn extract(st: Arc<AppState>, mut req: Request, ep: Endpoint) -> Result<Re
         Endpoint::Text | Endpoint::Fields | Endpoint::Document => Mode::Text,
         Endpoint::Markdown => Mode::Markdown { detect_headings: params.detect_headings },
     };
-    let ctx = Ctx { st, admitted, clean: params.clean };
+    let ctx = Ctx { st, admitted, clean: params.clean, input_bytes: input.bytes.len() };
     let ext = read_document(&ctx, input.bytes, detected.kind, &params, mode).await?;
     Ok(if ep == Endpoint::Document {
         render_document(ext, detected.source, &ignored)
@@ -170,6 +182,7 @@ struct Ctx {
     st: Arc<AppState>,
     admitted: Admitted,
     clean: bool,
+    input_bytes: usize,
 }
 
 /// A document's final text — normalized, cleaned when asked, within the text
@@ -183,10 +196,13 @@ struct Extraction {
     engine: Engine,
     timing: Timing,
     document: Option<Vec<DocumentPage>>,
+    debug: Option<DebugTrace>,
 }
 
 #[derive(Serialize)]
 struct DocumentResponse<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug: Option<&'a DebugTrace>,
     schema_version: &'static str,
     kind: &'static str,
     format: &'static str,
@@ -213,6 +229,7 @@ fn render_document(ext: Extraction, source: FormatSource, ignored: &[String]) ->
     let pages = ext.document.as_deref().unwrap_or_default();
     respond::json(
         &DocumentResponse {
+            debug: ext.debug.as_ref(),
             schema_version: "1.0",
             kind: "pdf",
             format: "pdf",
@@ -249,7 +266,17 @@ struct Paged {
 /// Reads a document to its final text, the one way every endpoint here does.
 async fn read_document(ctx: &Ctx, bytes: Bytes, kind: DocKind, params: &ExtractParams, mode: Mode) -> Result<Extraction, ApiError> {
     match kind {
-        DocKind::Office(fmt) => office_flow(ctx, bytes, fmt, mode).await,
+        DocKind::Office(fmt) => {
+            let mut ext = office_flow(ctx, bytes, fmt, mode).await?;
+            if params.include_debug {
+                let mut trace = DebugTrace::new(ctx.st.cfg.max_debug_bytes);
+                trace.push("office_parse", "ok", ext.timing.parse + ext.timing.extract,
+                    json!({"format":fmt.extension(),"input_bytes":ctx.input_bytes,"markdown":params.markdown}),
+                    json!({"text":ext.text,"truncated":ext.truncated}));
+                ext.debug = Some(trace);
+            }
+            Ok(ext)
+        }
         DocKind::Pdf => pdf_flow(ctx, bytes, params, mode).await,
         DocKind::Image(fmt) => image_flow(ctx, bytes, fmt, params).await,
     }
@@ -259,6 +286,8 @@ async fn read_document(ctx: &Ctx, bytes: Bytes, kind: DocKind, params: &ExtractP
 /// its metadata in `X-Oxide-*` headers.
 #[derive(Serialize)]
 struct ExtractResponse<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug: Option<&'a DebugTrace>,
     kind: &'static str,
     format: &'static str,
     format_source: FormatSource,
@@ -277,6 +306,7 @@ fn render(ext: Extraction, source: FormatSource, output: Output, ignored: &[Stri
     match output {
         Output::Json => respond::json(
             &ExtractResponse {
+                debug: ext.debug.as_ref(),
                 kind,
                 format,
                 format_source: source,
@@ -300,6 +330,7 @@ fn render(ext: Extraction, source: FormatSource, output: Output, ignored: &[Stri
                 let join = |v: &[usize]| v.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
                 meta.push(("x-oxide-incomplete", paged.incomplete.to_string()));
                 meta.push(("x-oxide-ocr-status", paged.ocr.status.as_str().to_string()));
+                meta.push(("x-oxide-ocr-engine", paged.ocr.engine.as_str().to_string()));
                 meta.push(("x-oxide-page-count", paged.page_count.to_string()));
                 meta.push(("x-oxide-pages-extracted", join(&paged.pages_extracted)));
                 if let Some(l) = paged.ocr.lang {
@@ -323,6 +354,8 @@ fn render(ext: Extraction, source: FormatSource, output: Output, ignored: &[Stri
 /// and a raw-text mode would have nowhere to put them.
 #[derive(Serialize)]
 struct FieldsResponse<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug: Option<&'a DebugTrace>,
     /// `pdf`, `office` or `image`; `text` when the caller sent the text.
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -362,7 +395,7 @@ async fn extract_fields(st: Arc<AppState>, mut req: Request) -> Result<Response,
         .ok_or_else(|| ApiError::bad_request("`fields` is required: a JSON array of field specs").with("parameter", "fields"))?;
     let fields = fields::parse(specs)?;
     let params = ExtractParams::parse(&input.params, Endpoint::Fields)?;
-    let ctx = Ctx { st, admitted, clean: params.clean };
+    let ctx = Ctx { st, admitted, clean: params.clean, input_bytes: input.bytes.len() };
 
     match (input.bytes.is_empty(), input.whole.get("text")) {
         (false, Some(_)) => Err(ApiError::bad_request("send either a document or `text`, not both").with("parameter", "text")),
@@ -379,6 +412,7 @@ async fn extract_fields(st: Arc<AppState>, mut req: Request) -> Result<Response,
             let (found, text, took) = match_fields(&ctx, fields, text).await?;
             let timing = Timing { queue: ctx.admitted.queue_wait, extract: took, ..Default::default() };
             let body = FieldsResponse {
+                debug: None,
                 kind: "text",
                 format: None,
                 format_source: None,
@@ -399,10 +433,11 @@ async fn extract_fields(st: Arc<AppState>, mut req: Request) -> Result<Response,
             count_document(detected.kind);
             let ignored = params.ignored(Some(detected.kind), Endpoint::Fields);
             let ext = read_document(&ctx, input.bytes, detected.kind, &params, Mode::Text).await?;
-            let Extraction { kind, text, truncated, paged, engine, mut timing, .. } = ext;
+            let Extraction { kind, text, truncated, paged, engine, mut timing, debug, .. } = ext;
             let (found, text, took) = match_fields(&ctx, fields, text).await?;
             timing.extract += took;
             let body = FieldsResponse {
+                debug: debug.as_ref(),
                 kind: kind.kind_str(),
                 format: Some(kind.format_str()),
                 format_source: Some(detected.source),
@@ -462,6 +497,7 @@ async fn office_flow(ctx: &Ctx, bytes: Bytes, fmt: OfficeFormat, mode: Mode) -> 
         engine: if fmt.is_odf() { Engine::Native } else { Engine::Office },
         timing: Timing { queue: ctx.admitted.queue_wait, parse, extract, ocr: None },
         document: None,
+        debug: None,
     })
 }
 
@@ -508,6 +544,7 @@ struct PageReason {
 #[derive(Serialize)]
 struct OcrInfo {
     status: OcrStatus,
+    engine: OcrEngine,
     #[serde(skip_serializing_if = "Option::is_none")]
     lang: Option<Lang>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -546,7 +583,8 @@ async fn pdf_flow(ctx: &Ctx, bytes: Bytes, params: &ExtractParams, mode: Mode) -
         deadline: native_deadline,
     };
     let rx = ctx.st.cpu.spawn(ctx.admitted.permit.clone(), cfg.process_timeout, move || pdf::phase1(bytes, &job));
-    let p1 = await_job(rx, native_deadline + GRACE).await?;
+    let started = Instant::now();
+    let p1 = await_job(rx, native_deadline + GRACE).await.map_err(|error| parser_debug_error(ctx, params, "pdf_oxide_parse", started.elapsed(), error))?;
     paged_flow(ctx, p1, params, DocKind::Pdf).await
 }
 
@@ -557,7 +595,8 @@ async fn image_flow(ctx: &Ctx, bytes: Bytes, fmt: ImageFormat, params: &ExtractP
     let rx = ctx.st.cpu.spawn(ctx.admitted.permit.clone(), cfg.process_timeout, move || {
         crate::raster::phase1(bytes, fmt, pages.as_deref(), ocr, max_pixels, max_pages)
     });
-    let p1 = await_job(rx, deadline).await?;
+    let started = Instant::now();
+    let p1 = await_job(rx, deadline).await.map_err(|error| parser_debug_error(ctx, params, "image_decode_plan", started.elapsed(), error))?;
     paged_flow(ctx, p1, params, DocKind::Image(fmt)).await
 }
 
@@ -566,18 +605,79 @@ async fn paged_flow(ctx: &Ctx, p1: Phase1, params: &ExtractParams, kind: DocKind
     let needing: Vec<(usize, OcrReason)> = p1.pages.iter().filter_map(|p| p.ocr.map(|r| (p.index, r))).collect();
     let reasons: Vec<PageReason> = needing.iter().map(|(i, r)| PageReason { page: i + 1, reason: *r }).collect();
 
+    let mut debug = params.include_debug.then(|| DebugTrace::new(ctx.st.cfg.max_debug_bytes));
+    if let Some(trace) = &mut debug {
+        trace.push(if kind == DocKind::Pdf { "pdf_oxide_parse" } else { "image_decode_plan" }, "ok", p1.parse_time + p1.extract_time,
+            json!({"kind":kind.kind_str(),"format":kind.format_str(),"input_bytes":ctx.input_bytes,"pages":params.pages,"ocr":format!("{:?}",params.ocr).to_ascii_lowercase(),"structured":params.structured,"markdown":params.markdown}),
+            json!({"page_count":p1.page_count,"incomplete":p1.incomplete,"truncated":p1.truncated,"pages":p1.pages.iter().map(|p| json!({"page":p.index+1,"text":p.text,"document":p.document,"ocr_reason":p.ocr,"failed":p.failed})).collect::<Vec<_>>()}));
+        trace.push("ocr_routing", "ok", Duration::ZERO,
+            json!({"engine":params.ocr_engine,"ocr":format!("{:?}",params.ocr).to_ascii_lowercase(),"lang":format!("{:?}",params.lang)}),
+            json!({"pages":reasons,"skipped":needing.is_empty() || params.ocr == OcrMode::Off}));
+    }
+    let started = Instant::now();
     let phase2 = if params.ocr == OcrMode::Off {
-        Phase2::skipped(OcrStatus::Off)
+        Ok(Phase2::skipped(OcrStatus::Off))
     } else if needing.is_empty() {
-        Phase2::skipped(OcrStatus::Native)
+        Ok(Phase2::skipped(OcrStatus::Native))
     } else {
         // Images have no native text to fall back on, so an image whose
         // every page failed is an error, as with `ocr=force`.
         let strict = params.ocr == OcrMode::Force || matches!(kind, DocKind::Image(_));
-        run_ocr(ctx, &p1, &needing, params.lang, strict).await?
+        if params.ocr_engine == OcrEngine::Indra {
+            #[cfg(feature = "ocr")]
+            { run_indra(ctx, &p1, &needing, params, strict, &mut debug).await }
+            #[cfg(not(feature = "ocr"))]
+            { Err(indra_unavailable()) }
+        } else {
+            run_ocr(ctx, &p1, &needing, params.lang, strict, params.include_debug).await
+        }
     };
+    let phase2 = match phase2 {
+        Ok(phase2) => phase2,
+        Err(mut error) => {
+            if let Some(mut trace) = debug {
+                trace.push("ocr_parse", "failed", started.elapsed(), json!({"engine":params.ocr_engine}), json!({"error":error.slug}));
+                error = error.with("debug", serde_json::to_value(trace).unwrap_or(Value::Null));
+            }
+            return Err(error);
+        }
+    };
+    if let Some(trace) = &mut debug {
+        trace.push("ocr_parse", if !phase2.timed_out.is_empty() { "timeout" } else if !phase2.failed.is_empty() { "partial" } else if !phase2.not_run.is_empty() { "unavailable" } else if needing.is_empty() || params.ocr == OcrMode::Off { "skipped" } else { "ok" }, started.elapsed(),
+            json!({"engine":params.ocr_engine,"pages":reasons}),
+            json!({"pages":phase2.texts.iter().map(|(i,text)|json!({"page":i+1,"text":text,"blocks":phase2.blocks.get(i)})).collect::<Vec<_>>(),"failed_pages":phase2.failed.iter().map(|i|i+1).collect::<Vec<_>>(),"timed_out_pages":phase2.timed_out.iter().map(|i|i+1).collect::<Vec<_>>(),"pages_needing_ocr":phase2.not_run.iter().map(|i|i+1).collect::<Vec<_>>()}));
+    }
+    let assemble_started = Instant::now();
+    let result = match finish(ctx, p1, phase2, reasons, kind, params.structured, params.ocr_engine) {
+        Ok(result) => result,
+        Err(mut error) => {
+            if let Some(trace) = debug {
+                error = error.with("debug", serde_json::to_value(trace).unwrap_or(Value::Null));
+            }
+            return Err(error);
+        }
+    };
+    if let Some(trace) = &mut debug {
+        trace.push("assemble", "ok", assemble_started.elapsed(),
+            json!({"engine":params.ocr_engine,"clean":params.clean,"max_text_chars":ctx.st.cfg.max_text_chars,"merge":"retain native text on hybrid pages and append nonduplicate OCR lines"}),
+            json!({"text":result.text,"pages":result.document,"truncated":result.truncated,"metadata":result.paged}));
+    }
+    Ok(Extraction { debug, ..result })
+}
 
-    finish(ctx, p1, phase2, reasons, kind, params.structured)
+fn parser_debug_error(ctx: &Ctx, params: &ExtractParams, step: &'static str, elapsed: Duration, mut error: ApiError) -> ApiError {
+    if params.include_debug {
+        let mut trace = DebugTrace::new(ctx.st.cfg.max_debug_bytes);
+        trace.push(step, "failed", elapsed,
+            json!({"input_bytes":ctx.input_bytes,"pages":params.pages,"ocr_engine":params.ocr_engine}),
+            json!({"error":error.slug,"title":error.title}));
+        error = error.with("debug", serde_json::to_value(trace).unwrap_or(Value::Null));
+    }
+    error
+}
+
+fn indra_unavailable() -> ApiError {
+    ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "ocr-unavailable", "OCR unavailable", "the selected Indra CLI or its configured models are unavailable")
 }
 
 /// Phase 2 outcome.
@@ -619,7 +719,7 @@ impl Phase2 {
 }
 
 #[cfg(not(feature = "ocr"))]
-async fn run_ocr(_ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], lang: LangParam, _strict: bool) -> Result<Phase2, ApiError> {
+async fn run_ocr(_ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], lang: LangParam, _strict: bool, _debug: bool) -> Result<Phase2, ApiError> {
     // `:slim` still classifies pages: report what needs OCR, plus the
     // language the `:ocr` image would use when the text layer decides it.
     let resolved = crate::pdf::lang::resolve_static(lang, p1.legacy_font, &p1.script_counts);
@@ -627,7 +727,97 @@ async fn run_ocr(_ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], lang: 
 }
 
 #[cfg(feature = "ocr")]
-async fn run_ocr(ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], lang_param: LangParam, strict: bool) -> Result<Phase2, ApiError> {
+async fn run_indra(ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], params: &ExtractParams, strict: bool, debug: &mut Option<DebugTrace>) -> Result<Phase2, ApiError> {
+    use crate::ocr::indra::{self, CliError};
+    let svc = &ctx.st.indra;
+    if !svc.available() {
+        return Err(indra_unavailable());
+    }
+    let started = Instant::now();
+    let deadline = ctx.admitted.admitted_at + ctx.st.cfg.ocr_timeout;
+    let mut out = Phase2::skipped(OcrStatus::Native);
+    out.status_hint = None;
+    let Ok(Ok(_slot)) = tokio::time::timeout_at(deadline.into(), svc.slots.clone().acquire_owned()).await else {
+        out.timed_out = needing.iter().map(|(i, _)| *i).collect();
+        return Ok(out);
+    };
+    for (batch, chunk) in needing.chunks(indra::BATCH_PAGES).enumerate() {
+        let remaining = &needing[batch * indra::BATCH_PAGES..];
+        if Instant::now() >= deadline {
+            out.timed_out.extend(remaining.iter().map(|(i, _)| *i));
+            break;
+        }
+        let dir = Arc::new(tempfile::tempdir().map_err(|_| ApiError::internal("could not create OCR scratch directory"))?);
+        let work_dir = dir.clone();
+        let source = p1.source.clone();
+        let indices: Vec<usize> = chunk.iter().map(|(i, _)| *i).collect();
+        let max_pixels = ctx.st.cfg.max_image_pixels;
+        let rx = ctx.st.cpu.spawn(ctx.admitted.permit.clone(), ctx.st.cfg.ocr_timeout, move || {
+            indices.into_iter().take_while(|_| Instant::now() < deadline).map(|i| (i, indra::prepare(&source, i, max_pixels, &work_dir))).collect::<Vec<_>>()
+        });
+        let prepared = match tokio::time::timeout_at(deadline.into(), rx).await {
+            Ok(Ok(Ok(pages))) if Instant::now() < deadline => pages,
+            _ => {
+                out.timed_out.extend(remaining.iter().map(|(i, _)| *i));
+                break;
+            }
+        };
+        let mut pages = Vec::new();
+        for (i, result) in prepared {
+            match result {
+                Ok(page) => pages.push(page),
+                Err(_) => out.failed.push(i),
+            }
+        }
+        if pages.is_empty() {
+            continue;
+        }
+        let cli_start = Instant::now();
+        let result = svc.run(&pages, deadline).await;
+        if let Some(trace) = debug {
+            trace.push("indra_cli", if result.is_ok() { "ok" } else { "failed" }, cli_start.elapsed(),
+                json!({"format":"json","mode":"ocr","cores":1,"keep_furniture":true,"math":ctx.st.cfg.indra_math,"pages":pages.iter().map(|p|json!({"page":p.index+1,"width":p.width,"height":p.height})).collect::<Vec<_>>()}),
+                match &result { Ok(values) => json!({"pages":indra::debug_output(values)}), Err(error) => json!({"error":format!("{error:?}")}) });
+        }
+        match result {
+            Ok(values) => {
+                for (page, value) in pages.iter().zip(values) {
+                    match indra::interpret(&value, page) {
+                        Ok(result) => {
+                            let has_native = p1.pages.iter().any(|p| p.index == page.index && !p.text.trim().is_empty());
+                            if result.text.trim().is_empty() && has_native {
+                                out.failed.push(page.index);
+                                continue;
+                            }
+                            out.texts.push((page.index, if params.markdown { result.markdown } else { result.text }));
+                            if params.structured || params.include_debug {
+                                out.blocks.insert(page.index, result.blocks);
+                            }
+                        }
+                        Err(_) => out.failed.push(page.index),
+                    }
+                }
+            }
+            Err(CliError::Unavailable) => return Err(indra_unavailable()),
+            Err(CliError::Timeout) => {
+                out.timed_out.extend(remaining.iter().map(|(i, _)| *i));
+                break;
+            }
+            Err(CliError::Failed) => out.failed.extend(pages.iter().map(|p| p.index)),
+        }
+        // The directory drops only after the CLI is reaped. PNGs contain the
+        // document and are never retained beyond this bounded batch.
+        drop(dir);
+    }
+    out.elapsed = Some(started.elapsed());
+    if strict && out.texts.is_empty() && !out.failed.is_empty() && out.timed_out.is_empty() {
+        return Err(ApiError::unprocessable("ocr-failed", "OCR failed", "Indra OCR failed on every requested page"));
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "ocr")]
+async fn run_ocr(ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], lang_param: LangParam, strict: bool, debug: bool) -> Result<Phase2, ApiError> {
     use crate::ocr::{LangPlan, OcrJob};
     use tokio::sync::oneshot;
 
@@ -663,6 +853,7 @@ async fn run_ocr(ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], lang_pa
             render: reason.renders(),
             accept_small_image: reason == OcrReason::Hybrid,
             structured: p1.pages.iter().any(|p| p.document.is_some()),
+            include_blocks: debug,
             lang: plan,
             permit: ctx.admitted.permit.clone(),
             reply: tx,
@@ -734,7 +925,7 @@ fn lang_source_str(s: LangSource) -> &'static str {
     }
 }
 
-fn finish(ctx: &Ctx, p1: Phase1, mut p2: Phase2, reasons: Vec<PageReason>, kind: DocKind, structured: bool) -> Result<Extraction, ApiError> {
+fn finish(ctx: &Ctx, p1: Phase1, mut p2: Phase2, reasons: Vec<PageReason>, kind: DocKind, structured: bool, engine: OcrEngine) -> Result<Extraction, ApiError> {
     let Phase1 { pages, page_count, incomplete: p1_incomplete, truncated: p1_truncated, parse_time, extract_time, .. } = p1;
     let mut ocr_texts: std::collections::HashMap<usize, String> = p2.texts.into_iter().collect();
     let mut out_pages: Vec<OutPage> = Vec::with_capacity(pages.len());
@@ -819,6 +1010,7 @@ fn finish(ctx: &Ctx, p1: Phase1, mut p2: Phase2, reasons: Vec<PageReason>, kind:
     let pages_extracted: Vec<usize> = out_pages.iter().map(|p| p.index + 1).collect();
     let ocr = OcrInfo {
         status,
+        engine,
         lang: p2.lang.map(|(l, _)| l),
         lang_source: p2.lang.map(|(_, s)| s),
         pages: ocr_pages,
@@ -835,5 +1027,6 @@ fn finish(ctx: &Ctx, p1: Phase1, mut p2: Phase2, reasons: Vec<PageReason>, kind:
         engine: Engine::Pdf,
         timing,
         document,
+        debug: None,
     })
 }

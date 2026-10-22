@@ -1,17 +1,16 @@
 # syntax=docker/dockerfile:1.7
 #
-# One image: native PDF + Office extraction and OCR (en, hi, ar).
+# One image: native PDF + Office extraction, PaddleOCR and the Indra CLI.
 #   docker build -t oxide-api .
 #
 # Every base image is pinned by multi-arch digest (Renovate bumps them).
-# All RUN stages execute on the build machine ($BUILDPLATFORM) and the Rust
-# stage cross-compiles for $TARGETPLATFORM, so an amd64 image builds at native
-# speed on an Apple-silicon Mac (no QEMU):
+# Rust and model stages use BUILDPLATFORM. Python dependencies install on
+# TARGETPLATFORM (cross-platform builds need emulation for that stage).
 #   docker build --platform linux/amd64 -t oxide-api .
 
 ARG RUST_BOOKWORM=rust:1-bookworm@sha256:59037199c44290f2befcdd58dcc540164763fc296950255aaefeef096a1866b0
 ARG ALPINE=alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
-ARG CC_BASE=gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+ARG PYTHON_BASE=python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
 ARG DEBIAN_SLIM=debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 ARG ORT_VERSION=1.28.3
@@ -90,6 +89,8 @@ FROM --platform=$BUILDPLATFORM ${ALPINE} AS models
 RUN apk add --no-cache curl
 COPY scripts/fetch_ocr_models.sh /fetch_ocr_models.sh
 RUN sh /fetch_ocr_models.sh /models
+COPY scripts/fetch_indra_models.sh /fetch_indra_models.sh
+RUN sh /fetch_indra_models.sh /models/indra
 
 # ---------------------------------------------------------------------------
 # fonts: metric-compatible substitutes for the PDF base-14 fonts. OCR reads
@@ -103,10 +104,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends fonts-liberatio
  && cp /usr/share/doc/fonts-liberation2/copyright /fonts/LICENSE-Liberation
 
 # ---------------------------------------------------------------------------
-# runtime (final stage, the default build target). COPY only, no RUN, so it
-# never executes target-architecture code at build time.
+# Python dependencies for the pinned Indra CLI (CPU wheels, no compilers).
 # ---------------------------------------------------------------------------
-FROM ${CC_BASE} AS runtime
+FROM ${PYTHON_BASE} AS indra-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements-indra.txt /tmp/requirements-indra.txt
+RUN pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/requirements-indra.txt \
+    && indra-ocr --version
+
+FROM indra-runtime AS runtime
 ARG ORT_VERSION
 ARG VERSION=0.3.1
 LABEL org.opencontainers.image.title="oxide-api" \
@@ -117,6 +124,8 @@ LABEL org.opencontainers.image.title="oxide-api" \
       dev.oxide-api.pdf-oxide="0.3.78+patched" \
       dev.oxide-api.office-oxide="0.1.13" \
       dev.oxide-api.onnxruntime="${ORT_VERSION}" \
+      dev.oxide-api.indra-ocr="0.3.2" \
+      dev.oxide-api.models.indra="ed345c7f158eddbc7dee0c6a7269afb75a94f7e8" \
       dev.oxide-api.models.deepghs-paddleocr="e7bd63d9c674c96bd4fdab435af0efb383919c18" \
       dev.oxide-api.models.monkt-paddleocr-onnx="7b02d0a30a07ba2b92ad1ff5a8941ae2c633de65" \
       dev.oxide-api.models.paddleocr-dicts="dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf"
@@ -129,7 +138,11 @@ USER 65532:65532
 # engines' document-derived log lines out (see init_logging in src/main.rs).
 ENV OXIDE_API_ADDR=0.0.0.0:8080 \
     ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so \
-    OXIDE_API_OCR_MODEL_DIR=/models
+    OXIDE_API_OCR_MODEL_DIR=/models \
+    OXIDE_API_INDRA_MODEL_DIR=/models/indra \
+    OXIDE_API_INDRA_MATH=true \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HUB_OFFLINE=1
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --start-period=60s --retries=3 CMD ["/usr/local/bin/oxide-api", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/oxide-api"]

@@ -16,6 +16,7 @@ pub struct Config {
     pub body_timeout: Duration,
     pub process_timeout: Duration,
     pub max_text_chars: usize,
+    pub max_debug_bytes: usize,
     pub max_pdf_pages: usize,
     pub max_image_pixels: u64,
     pub drain_delay: Duration,
@@ -23,6 +24,10 @@ pub struct Config {
     pub ocr_timeout: Duration,
     pub ocr_languages: Vec<String>,
     pub ocr_model_dir: PathBuf,
+    pub indra_cli: PathBuf,
+    pub indra_model_dir: PathBuf,
+    pub indra_math: bool,
+    pub indra_max_concurrent: usize,
 }
 
 pub const DEFAULT_ADDR: &str = "0.0.0.0:8080";
@@ -80,6 +85,11 @@ impl Config {
         }
 
         let default_retry = if cfg!(feature = "ocr") { 10 } else { 1 };
+        let indra_math = match var("OXIDE_API_INDRA_MATH").as_deref().map(str::to_ascii_lowercase).as_deref() {
+            None | Some("true" | "1" | "yes" | "on") => true,
+            Some("false" | "0" | "no" | "off") => false,
+            Some(_) => return Err("OXIDE_API_INDRA_MATH: expected true or false".into()),
+        };
 
         Ok(Self {
             addr,
@@ -92,6 +102,7 @@ impl Config {
             body_timeout: Duration::from_secs(num("OXIDE_API_BODY_TIMEOUT_SECS", 30, 1)?),
             process_timeout: Duration::from_secs(num("OXIDE_API_PROCESS_TIMEOUT_SECS", 30, 1)?),
             max_text_chars: num("OXIDE_API_MAX_TEXT_CHARS", 4 * 1024 * 1024, 1)? as usize,
+            max_debug_bytes: num("OXIDE_API_MAX_DEBUG_BYTES", 1024 * 1024, 1)? as usize,
             max_pdf_pages: num("OXIDE_API_MAX_PDF_PAGES", 2000, 1)? as usize,
             max_image_pixels: num("OXIDE_API_MAX_IMAGE_PIXELS", 64_000_000, 1)?,
             drain_delay: Duration::from_secs(num("OXIDE_API_DRAIN_DELAY_SECS", 2, 0)?),
@@ -99,6 +110,10 @@ impl Config {
             ocr_timeout: Duration::from_secs(num("OXIDE_API_OCR_TIMEOUT_SECS", 120, 1)?),
             ocr_languages,
             ocr_model_dir: var("OXIDE_API_OCR_MODEL_DIR").map_or_else(|| PathBuf::from("/models"), PathBuf::from),
+            indra_cli: var("OXIDE_API_INDRA_CLI").map_or_else(|| PathBuf::from("indra-ocr"), PathBuf::from),
+            indra_model_dir: var("OXIDE_API_INDRA_MODEL_DIR").map_or_else(|| PathBuf::from("/models/indra"), PathBuf::from),
+            indra_math,
+            indra_max_concurrent: num("OXIDE_API_INDRA_MAX_CONCURRENT", 1, 1)? as usize,
         })
     }
 
@@ -140,6 +155,8 @@ mod tests {
         assert_eq!(c.max_pdf_pages, 2000);
         assert_eq!(c.max_image_pixels, 64_000_000);
         assert_eq!(c.ocr_languages, vec!["en", "hi", "ar"]);
+        assert!(c.indra_math);
+        assert_eq!(c.indra_max_concurrent, 1);
     }
 
     #[test]
@@ -147,5 +164,13 @@ mod tests {
         assert!(cfg(&[("OXIDE_API_API_KEY", "short")]).is_err());
         assert!(cfg(&[("OXIDE_API_API_KEY", "0123456789abcdef"), ("OXIDE_API_MAX_INFLIGHT", "x")]).is_err());
         assert!(cfg(&[("OXIDE_API_API_KEY", "0123456789abcdef"), ("OXIDE_API_OCR_LANGUAGES", "en,fr")]).is_err());
+        assert!(cfg(&[("OXIDE_API_ADDR", "127.0.0.1:8080"), ("OXIDE_API_INDRA_MATH", "maybe")]).is_err());
+        assert!(cfg(&[("OXIDE_API_ADDR", "127.0.0.1:8080"), ("OXIDE_API_INDRA_MAX_CONCURRENT", "0")]).is_err());
+    }
+
+    #[test]
+    fn indra_math_can_be_disabled() {
+        let c = cfg(&[("OXIDE_API_ADDR", "127.0.0.1:8080"), ("OXIDE_API_INDRA_MATH", "false")]).unwrap();
+        assert!(!c.indra_math);
     }
 }
