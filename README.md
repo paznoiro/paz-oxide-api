@@ -508,6 +508,15 @@ native-only binary (images then report `ocr.status: "unavailable"`).
    reading order as whole blocks, so a side-by-side buyer is read before the item table.
    `tests/fixtures/facturx-basic.pdf` is the InvoiceXML demonstration invoice (test data only)
    used to check the six-column item table and the two-row VAT table through the API.
+5. **`region-box-score`**: a detected text region was scored by the mean probability over its
+   axis-aligned bounding rectangle, where PaddleOCR scores the box's polygon. A slanting line fills
+   only part of that rectangle, so it fell under the 0.6 box threshold although the detector was sure
+   of it (0.99 inside the line, 0.33–0.59 over the rectangle): a handwritten Tamil page lost six of
+   its eight lines (115 → 302 characters), a handwritten Hindi page half its text (299 → 608), and
+   a receipt scanned a little askew its whole header (SROIE `X51005268275`, 585 → 1058). Each region
+   is now scored on its own pixels. On nine English receipts and invoices no text was lost, only
+   lines and cells added; the printed Tamil page read the same. The Documents preview's browser
+   port of the pipeline (erp-ui `documents-ui/src/lib/ocr/paddle/pipeline.ts`) scores the same way.
 
 Drop them once upstream ships fixes. Markdown preserves semantic structure, not the PDF's exact
 page styling; scanned pages still have only the lines and paragraphs supplied by OCR.
@@ -520,7 +529,7 @@ page styling; scanned pages still have only the lines and paragraphs supplied by
 | PDF and Office input | adds **OpenDocument** and **images** | requested later; ODF goes through an own reader into `office_oxide`'s document model, images straight to OCR |
 | OCR in `en`, `hi`, `ar` | adds **`ta`** (Tamil, PP-OCRv5) | requested later; the v5 model needs no word splitting or vowel reordering (measured above) |
 | ONNX Runtime 1.23.x | **1.28.3** | `ort` 2.0.0-rc.13 (pinned by `pdf_oxide`) enables `api-27` and refuses older runtimes |
-| Stock `pdf_oxide` | four patches | see above |
+| Stock `pdf_oxide` | five patches | see above |
 | OCR reads the page's largest image | same, **plus page rendering** for legacy-font pages, `ocr=force` and pages without a usable scan | Kruti Dev pages are vector text with no image to OCR |
 | Image has no fonts | adds Liberation Sans/Serif/Mono (≈ 2.4 MB) | rendering a page whose Helvetica/Times/Courier isn't embedded otherwise produces a blank image |
 | `page_font_face_lookups()` | reads each requested page's `/Resources /Font` | the upstream call walks every page of the document |
