@@ -121,6 +121,8 @@ req "scan ar (probe)"   200 "j['ocr']['lang']=='ar' and j['ocr']['lang_source']=
     -H "$AUTH" --data-binary @$F/scan_ar.pdf "$URL/v1/extract/text"
 req "scan ta (probe)"   200 "j['ocr']['lang']=='ta' and j['ocr']['lang_source']=='probe' and 'தமிழ்நாடு அரசு' in j['text']" \
     -H "$AUTH" --data-binary @$F/scan_ta.pdf "$URL/v1/extract/text"
+req "mixed en+ar scan: Arabic lines kept" 200 "j['ocr']['lang']=='en' and 'Invoice number 4471' in j['text'] and 'فاتورة ضريبية' in j['text'] and 'شكرا لتعاملكم معنا' in j['text']" \
+    -H "$AUTH" --data-binary @$F/scan_mixed_en_ar.pdf "$URL/v1/extract/text"
 req "lang=ar param"     200 "j['ocr']['lang']=='ar' and j['ocr']['lang_source']=='param'" \
     -H "$AUTH" --data-binary @$F/scan_ar.pdf "$URL/v1/extract/text?lang=ar"
 req "ocr=off skips OCR" 200 "j['ocr']['status']=='off' and len(j['text'])<20" \

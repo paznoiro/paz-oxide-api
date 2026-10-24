@@ -87,6 +87,25 @@ async fn scans_per_language_with_probe() {
     }
 }
 
+/// An English invoice scan with Arabic lines: the page language is English,
+/// but the Arabic lines switch to the Arabic recognizer instead of being
+/// dropped. Forcing either language keeps both scripts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_script_scan_reads_each_line_in_its_own_script() {
+    let (app, _) = app_with(&[]).await;
+    let want = ["TAX INVOICE", "Invoice number 4471", "فاتورة ضريبية", "Customer Al Noor Trading LLC", "شكرا لتعاملكم معنا", "Payment due within 30 days"];
+    for (query, lang, source) in [("", "en", "probe"), ("?lang=en", "en", "param"), ("?lang=ar", "ar", "param")] {
+        let (status, j) = extract(&app, &format!("/v1/extract/text{query}"), "scan_mixed_en_ar.pdf").await;
+        assert_eq!(status, StatusCode::OK, "{query}: {j}");
+        eprintln!("--- mixed{query}: lang={} source={}\n{}", j["ocr"]["lang"], j["ocr"]["lang_source"], text(&j));
+        assert_eq!(j["ocr"]["lang"], lang, "{query}");
+        assert_eq!(j["ocr"]["lang_source"], source, "{query}");
+        for line in want {
+            assert!(text(&j).contains(line), "{query}: expected {line:?} in {:?}", text(&j));
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scanned_page_overlay_text_does_not_pick_language() {
     // A browser print header/footer is a Latin text layer over a Hindi scan.

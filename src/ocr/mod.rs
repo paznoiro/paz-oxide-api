@@ -1,5 +1,5 @@
 //! OCR subsystem (`ocr` feature): ONNX Runtime via `pdf_oxide`'s detector
-//! and recognizers, composed as one detector + `en`/`hi`/`ar` recognizers
+//! and recognizers, composed as one detector + `en`/`hi`/`ar`/`ta` recognizers
 //! per worker.
 
 pub mod page;

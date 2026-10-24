@@ -179,37 +179,109 @@ fn word_gap(lang: Lang) -> Option<f32> {
     }
 }
 
-fn recognize_boxes(stack: &OcrStack, img: &DynamicImage, boxes: &[DetectedBox], lang: Lang) -> Result<Vec<Span>, String> {
+/// Mixed-script pages (an English invoice with Arabic lines, bilingual
+/// forms) are read line by line: the page language reads every line first,
+/// and a line it reads with less than this confidence, or not in its own
+/// script, is also read with the other available languages.
+const LINE_ACCEPT: f32 = 0.9;
+/// Another language replaces the page language's reading of a line only
+/// when its own reading is in its own script and at least this confident:
+/// a recognizer reading a script it doesn't know (or a logo) can still
+/// emit a short, fairly confident string in its own script.
+const LINE_SWITCH_MIN: f32 = 0.8;
+/// …and, when the page language's reading is plausible (its own script),
+/// beats it by this much.
+const LINE_SWITCH_MARGIN: f32 = 0.1;
+
+struct LineRead {
+    text: String,
+    confidence: f32,
+    /// Letters mostly in the language's own script, or no letters at all.
+    own_script: bool,
+}
+
+/// Reads one line crop with one recognizer: word split where the language
+/// needs it, recognize, drop low-confidence pieces, postprocess. `None`
+/// when nothing survives.
+fn read_line(stack: &OcrStack, crop: &DynamicImage, lang: Lang) -> Result<Option<LineRead>, String> {
     let rec = stack.recognizers.get(&lang).ok_or_else(|| format!("recognizer {} not loaded", lang.code()))?;
     let threshold = stack.config.rec_threshold;
-    let mut spans = Vec::with_capacity(boxes.len());
-    for b in boxes {
-        let crop = crop_text_region(img, &b.polygon).map_err(|e| format!("crop failed: {e}"))?;
-        let segments = word_gap(lang).map_or_else(Vec::new, |gap| word_segments(&crop, gap));
-        let pieces: Vec<DynamicImage> = if segments.len() > 1 {
-            segments.iter().map(|&(x0, x1)| crop.crop_imm(x0, 0, x1 - x0, crop.height())).collect()
-        } else {
-            vec![crop]
-        };
-        let mut words: Vec<String> = Vec::with_capacity(pieces.len());
-        let (mut conf_sum, mut chars) = (0.0f32, 0usize);
-        for piece in &pieces {
-            let r = rec.recognize(piece).map_err(|e| format!("recognition failed: {e}"))?;
-            let n = r.text.trim().chars().count();
-            if n == 0 || r.confidence < threshold {
-                continue;
-            }
-            conf_sum += r.confidence * n as f32;
-            chars += n;
-            words.push(postprocess(lang, r.text.trim()));
-        }
-        if words.is_empty() {
+    let segments = word_gap(lang).map_or_else(Vec::new, |gap| word_segments(crop, gap));
+    let split: Vec<DynamicImage>;
+    let pieces: &[DynamicImage] = if segments.len() > 1 {
+        split = segments.iter().map(|&(x0, x1)| crop.crop_imm(x0, 0, x1 - x0, crop.height())).collect();
+        &split
+    } else {
+        std::slice::from_ref(crop)
+    };
+    let mut words: Vec<String> = Vec::with_capacity(pieces.len());
+    let (mut conf_sum, mut chars) = (0.0f32, 0usize);
+    for piece in pieces {
+        let r = rec.recognize(piece).map_err(|e| format!("recognition failed: {e}"))?;
+        let n = r.text.trim().chars().count();
+        if n == 0 || r.confidence < threshold {
             continue;
         }
-        if lang == Lang::Ar {
-            words.reverse(); // segments run left to right; Arabic reads right to left
+        conf_sum += r.confidence * n as f32;
+        chars += n;
+        words.push(postprocess(lang, r.text.trim()));
+    }
+    if words.is_empty() {
+        return Ok(None);
+    }
+    if lang == Lang::Ar {
+        words.reverse(); // segments run left to right; Arabic reads right to left
+    }
+    let text = words.join(" ");
+    let counts = ScriptCounts::of(&text, usize::MAX);
+    let own_script = counts.letters() == 0 || lang.script_share(&counts) >= 0.5;
+    Ok(Some(LineRead { text, confidence: conf_sum / chars as f32, own_script }))
+}
+
+/// `None`: the page language's reading of a line stands. Otherwise the
+/// confidence another language's own-script reading needs to replace it.
+fn switch_bar(main: Option<&LineRead>) -> Option<f32> {
+    match main {
+        Some(l) if l.own_script && l.confidence >= LINE_ACCEPT => None,
+        Some(l) if l.own_script => Some((l.confidence + LINE_SWITCH_MARGIN).max(LINE_SWITCH_MIN)),
+        _ => Some(LINE_SWITCH_MIN),
+    }
+}
+
+/// Reads every box with `lang`, switching single lines to another of
+/// `line_langs` where that reads them clearly better (see `LINE_ACCEPT`).
+fn recognize_boxes(stack: &OcrStack, img: &DynamicImage, boxes: &[DetectedBox], lang: Lang, line_langs: &[Lang]) -> Result<Vec<Span>, String> {
+    if !stack.recognizers.contains_key(&lang) {
+        return Err(format!("recognizer {} not loaded", lang.code()));
+    }
+    let others: Vec<Lang> = line_langs.iter().copied().filter(|&l| l != lang && stack.recognizers.contains_key(&l)).collect();
+    let mut spans = Vec::with_capacity(boxes.len());
+    let mut switched = 0usize;
+    for b in boxes {
+        let crop = crop_text_region(img, &b.polygon).map_err(|e| format!("crop failed: {e}"))?;
+        let mut line = read_line(stack, &crop, lang)?;
+        if let Some(bar) = switch_bar(line.as_ref()).filter(|_| !others.is_empty()) {
+            let mut best: Option<LineRead> = None;
+            for &other in &others {
+                if let Some(r) = read_line(stack, &crop, other)?
+                    && r.own_script
+                    && r.confidence >= bar
+                    && best.as_ref().is_none_or(|b| r.confidence > b.confidence)
+                {
+                    best = Some(r);
+                }
+            }
+            if best.is_some() {
+                line = best;
+                switched += 1;
+            }
         }
-        spans.push(Span::new(words.join(" "), conf_sum / chars as f32, &b.polygon));
+        if let Some(l) = line {
+            spans.push(Span::new(l.text, l.confidence, &b.polygon));
+        }
+    }
+    if switched > 0 {
+        tracing::debug!(lang = lang.code(), lines = boxes.len(), switched, "ocr lines read in another language");
     }
     Ok(spans)
 }
@@ -372,17 +444,19 @@ fn page_ocr(spans: Vec<Span>, lang: Lang) -> PageOcr {
     PageOcr { text, lang, blocks }
 }
 
-/// OCR one image with a fixed language.
-pub fn ocr_image(stack: &OcrStack, img: &DynamicImage, lang: Lang) -> Result<PageOcr, String> {
+/// OCR one image with a fixed page language. Single lines may switch to
+/// another of `line_langs` (empty: no switching).
+pub fn ocr_image(stack: &OcrStack, img: &DynamicImage, lang: Lang, line_langs: &[Lang]) -> Result<PageOcr, String> {
     let boxes = detect(stack, img)?;
-    let spans = recognize_boxes(stack, img, &boxes, lang)?;
+    let spans = recognize_boxes(stack, img, &boxes, lang, line_langs)?;
     tracing::debug!(boxes = boxes.len(), spans = spans.len(), chars = spans.iter().map(|s| s.text.len()).sum::<usize>(), lang = lang.code(), "ocr fixed");
     Ok(page_ocr(spans, lang))
 }
 
 /// Language probe: detect once, recognize the 8 largest boxes with every
 /// candidate recognizer, keep the best mean confidence among outputs
-/// dominated by their own script. The detection is reused for the page.
+/// dominated by their own script. The detection is reused for the page,
+/// and single lines may switch to another candidate.
 pub fn probe_and_ocr(stack: &OcrStack, img: &DynamicImage, candidates: &[Lang]) -> Result<(PageOcr, bool), String> {
     let boxes = detect(stack, img)?;
     let mut by_size: Vec<&DetectedBox> = boxes.iter().collect();
@@ -417,7 +491,7 @@ pub fn probe_and_ocr(stack: &OcrStack, img: &DynamicImage, candidates: &[Lang]) 
         Some((l, _)) => (l, true),
         None => (Lang::En, false),
     };
-    let spans = recognize_boxes(stack, img, &boxes, lang)?;
+    let spans = recognize_boxes(stack, img, &boxes, lang, candidates)?;
     tracing::debug!(boxes = boxes.len(), spans = spans.len(), lang = lang.code(), probed, "ocr probe done");
     Ok((page_ocr(spans, lang), probed))
 }
@@ -483,6 +557,20 @@ mod tests {
 
     fn span(t: &str, x: f32, y: f32, w: f32, h: f32) -> Span {
         Span::new(t.into(), 0.9, &[[x, y], [x + w, y], [x + w, y + h], [x, y + h]])
+    }
+
+    #[test]
+    fn line_switch_bar() {
+        let read = |confidence, own_script| LineRead { text: String::new(), confidence, own_script };
+        // A confident own-script reading stands: no other recognizer runs.
+        assert_eq!(switch_bar(Some(&read(0.95, true))), None);
+        // Dropped (e.g. Arabic read by the English recognizer) or another
+        // script (English read by the Arabic recognizer): a clear reading wins.
+        assert_eq!(switch_bar(None), Some(LINE_SWITCH_MIN));
+        assert_eq!(switch_bar(Some(&read(0.99, false))), Some(LINE_SWITCH_MIN));
+        // A plausible but unsure reading must be beaten by a margin.
+        assert_eq!(switch_bar(Some(&read(0.85, true))), Some(0.85 + LINE_SWITCH_MARGIN));
+        assert_eq!(switch_bar(Some(&read(0.6, true))), Some(LINE_SWITCH_MIN));
     }
 
     #[test]

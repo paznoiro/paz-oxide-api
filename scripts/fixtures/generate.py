@@ -219,6 +219,28 @@ def make_scans():
         FONT_TAML, 60, *A4_200))
 
 
+def make_mixed_scan():
+    """An English invoice scan with two Arabic lines: the page reads as
+    English, and the Arabic lines must switch to the Arabic recognizer."""
+    width, height = A4_200
+    img = Image.new("L", (width, height), 255)
+    d = ImageDraw.Draw(img)
+    lines = [("en", "TAX INVOICE"), ("en", "Invoice number 4471"), ("ar", "فاتورة ضريبية"),
+             ("en", "Customer Al Noor Trading LLC"), ("en", "Total amount due 1250 AED"),
+             ("ar", "شكرا لتعاملكم معنا"), ("en", "Payment due within 30 days")]
+    y = 120
+    for lang, line in lines:
+        rtl = lang == "ar"
+        font = ImageFont.truetype(FONT_ARAB if rtl else FONT_LATIN, 60 if rtl else 56,
+                                  layout_engine=ImageFont.Layout.RAQM)
+        kw = {"direction": "rtl", "language": "ar"} if rtl else {}
+        box = d.textbbox((0, 0), line, font=font, **kw)
+        x = width - 120 - (box[2] - box[0]) if rtl else 120
+        d.text((x, y), line, font=font, fill=0, **kw)
+        y += 110
+    image_pdf(out("scan_mixed_en_ar.pdf"), img)
+
+
 def make_scan_with_overlay():
     """A Hindi scan saved via a browser's print dialog: the page is the
     image plus a Latin text layer (date, title, URL, page number) that has
@@ -530,6 +552,7 @@ GROUPS = {
     "odf": make_odf,          # needs the office group's output
     "pdf": make_native_pdfs,
     "scans": make_scans,
+    "mixed": make_mixed_scan,
     "overlay": make_scan_with_overlay,
     "ocr_layer": make_scans_with_ocr_layer,
     "hybrid": make_hybrid,

@@ -483,7 +483,8 @@ components:
       description: |
         PDF and images. Select PaddleOCR or the Indra CLI. Paddle is the default.
         The selected engine obeys ocr=auto|force|off and pages. Indra uses automatic
-        script selection; lang is ignored and listed in ignored_params. Indra math
+        script selection; lang is ignored and listed in ignored_params. Its pinned
+        models read Latin, Devanagari and CJK, not Arabic or Tamil. Indra math
         is enabled by default; OXIDE_API_INDRA_MATH=false disables it server-wide.
         A needed but unavailable Indra installation returns 503 ocr-unavailable.
       schema: { type: string, enum: [paddle, indra], default: paddle }
@@ -506,7 +507,8 @@ components:
       description: |
         PDF and images. PaddleOCR language (ignored by Indra). `auto` resolves once per document: legacy Hindi font →
         `hi`; else the native text's script; else a confidence probe on the first OCR page; else
-        `en`.
+        `en`. On mixed-script pages, a line the document language can't read confidently is
+        read by the recognizer of its own script (e.g. Arabic lines on an English invoice).
       schema:
         type: string
         enum: [auto, en, hi, ar, ta]

@@ -26,7 +26,7 @@ const MIN_SIMILARITY: f32 = 0.8;
 pub fn run(stack: &OcrStack, lang: Lang) -> Result<(), String> {
     let g = golden(lang);
     let img = image::load_from_memory(g.png).map_err(|e| format!("fixture decode failed: {e}"))?;
-    let out = page::ocr_image(stack, &img, lang)?;
+    let out = page::ocr_image(stack, &img, lang, &[])?;
     let sim = similarity(&out.text, g.expected);
     if sim >= MIN_SIMILARITY {
         Ok(())

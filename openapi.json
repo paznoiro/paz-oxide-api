@@ -760,7 +760,7 @@
       "ocr_engine": {
         "name": "ocr_engine",
         "in": "query",
-        "description": "PDF and images. Select PaddleOCR or the Indra CLI. Paddle is the default.\nThe selected engine obeys ocr=auto|force|off and pages. Indra uses automatic\nscript selection; lang is ignored and listed in ignored_params. Indra math\nis enabled by default; OXIDE_API_INDRA_MATH=false disables it server-wide.\nA needed but unavailable Indra installation returns 503 ocr-unavailable.\n",
+        "description": "PDF and images. Select PaddleOCR or the Indra CLI. Paddle is the default.\nThe selected engine obeys ocr=auto|force|off and pages. Indra uses automatic\nscript selection; lang is ignored and listed in ignored_params. Its pinned\nmodels read Latin, Devanagari and CJK, not Arabic or Tamil. Indra math\nis enabled by default; OXIDE_API_INDRA_MATH=false disables it server-wide.\nA needed but unavailable Indra installation returns 503 ocr-unavailable.\n",
         "schema": {
           "type": "string",
           "enum": [
@@ -783,7 +783,7 @@
         "name": "lang",
         "in": "query",
         "required": false,
-        "description": "PDF and images. PaddleOCR language (ignored by Indra). `auto` resolves once per document: legacy Hindi font →\n`hi`; else the native text's script; else a confidence probe on the first OCR page; else\n`en`.\n",
+        "description": "PDF and images. PaddleOCR language (ignored by Indra). `auto` resolves once per document: legacy Hindi font →\n`hi`; else the native text's script; else a confidence probe on the first OCR page; else\n`en`. On mixed-script pages, a line the document language can't read confidently is\nread by the recognizer of its own script (e.g. Arabic lines on an English invoice).\n",
         "schema": {
           "type": "string",
           "enum": [

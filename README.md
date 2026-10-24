@@ -199,7 +199,10 @@ merged with OCR using the shared flow. The CLI uses `--format json --mode ocr
 `OXIDE_API_INDRA_MATH=false` in the container environment/deployment properties.
 `lang` selects Paddle recognizers; Indra selects scripts itself, so a supplied
 `lang` is listed in `ignored_params`. Script support depends on the pinned Indra
-model set, independent of Paddle's `en,hi,ar,ta` recognizers.
+model set, independent of Paddle's `en,hi,ar,ta` recognizers: the 0.3.2 set reads
+Latin, Devanagari and CJK, and has **no Arabic or Tamil characters**, so Arabic or
+Tamil text comes back as Latin look-alikes or not at all. Use the default `paddle`
+engine for those.
 
 ```sh
 curl -H "$AUTH" -F file=@invoice.pdf \
@@ -370,6 +373,16 @@ owner-password-only PDF opens normally.
   first OCR page with every recognizer, and the most confident one whose output is in its own script
   wins. If nothing else applies, `en`. The response reports `lang` and
   `lang_source: param|font|text|probe|default`.
+- **Mixed-script pages** (an English invoice with Arabic lines, bilingual forms). The document language,
+  whether resolved or set by `lang`, reads every line first. A line it reads below 0.9 confidence or
+  outside its own script (Arabic lines are mostly dropped by the English recognizer; English read by
+  the Arabic one comes out reversed) is also read by the other available recognizers. One of them takes
+  the line when its output is in its own script, at least 0.8 confident and, against a plausible
+  first reading, 0.1 better. On English+Arabic, English+Tamil and Arabic-majority test pages (clean and
+  blurred) every line came out right in auto, `lang=en` and `lang=ar`, where before 2–5 of 6–7 lines
+  did. On 144 labelled single-language lines and the scan fixtures no output changed and time stayed
+  the same, since confident lines never try another recognizer. `lang` stays one value: it names the
+  document language reported in the response, not a filter.
 - **Startup.** Each OCR worker builds one detector plus `en`/`hi`/`ar`/`ta` recognizers once, then runs a
   golden image per language. `/readyz` turns green only after that, about 0.3 s after start. A
   language that fails is reported `unavailable` by name in `/version`, and requests needing it get

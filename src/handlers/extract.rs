@@ -855,6 +855,7 @@ async fn run_ocr(ctx: &Ctx, p1: &Phase1, needing: &[(usize, OcrReason)], lang_pa
             structured: p1.pages.iter().any(|p| p.document.is_some()),
             include_blocks: debug,
             lang: plan,
+            line_langs: avail.clone(),
             permit: ctx.admitted.permit.clone(),
             reply: tx,
         };

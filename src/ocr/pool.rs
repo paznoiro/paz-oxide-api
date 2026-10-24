@@ -36,6 +36,9 @@ pub struct OcrJob {
     /// Include recognizer boxes in opt-in diagnostics without changing routing.
     pub include_blocks: bool,
     pub lang: LangPlan,
+    /// Available languages a single line may switch to when the page
+    /// language can't read it (mixed-script pages). Empty: no switching.
+    pub line_langs: Vec<Lang>,
     pub permit: JobPermit,
     pub reply: oneshot::Sender<Result<OcrPageResult, String>>,
 }
@@ -286,7 +289,7 @@ fn worker(
 
 fn run_job(stack: &stack::OcrStack, job: &OcrJob) -> Result<(page::PageOcr, bool), String> {
     let doc = match &job.source {
-        PageSource::Image(img) => return ocr_one(stack, &img.decode(job.page)?, &job.lang),
+        PageSource::Image(img) => return ocr_one(stack, &img.decode(job.page)?, job),
         PageSource::Pdf(doc) => doc,
     };
     if job.structured {
@@ -296,7 +299,7 @@ fn run_job(stack: &stack::OcrStack, job: &OcrJob) -> Result<(page::PageOcr, bool
         let frame =
             PageFrame::read(doc, job.page).map_err(|e| format!("page geometry failed: {e}"))?;
         let img = page::rendered_image(doc, job.page)?;
-        let (mut out, probed) = ocr_one(stack, &img, &job.lang)?;
+        let (mut out, probed) = ocr_one(stack, &img, job)?;
         for block in &mut out.blocks {
             block.bbox = block.bbox.and_then(|b| frame.ocr_box(b, img.width(), img.height()));
         }
@@ -305,14 +308,14 @@ fn run_job(stack: &stack::OcrStack, job: &OcrJob) -> Result<(page::PageOcr, bool
     // Legacy-font pages are vector text: there is no scan to try, render only.
     if job.render {
         let img = page::rendered_image(doc, job.page)?;
-        return ocr_one(stack, &img, &job.lang);
+        return ocr_one(stack, &img, job);
     }
     // Hybrid stamps: the small embedded image *is* the target; rendering the
     // whole page would re-OCR the native text we already have. Keep the old
     // embedded-or-render behaviour with no fallback.
     if job.accept_small_image {
         let img = page::page_image(doc, job.page, job.render, job.accept_small_image)?;
-        return ocr_one(stack, &img, &job.lang);
+        return ocr_one(stack, &img, job);
     }
     // Scanned / forced pages: the largest embedded image should be the scan,
     // but a full-page background, QR code or logo can win that contest while
@@ -326,15 +329,15 @@ fn run_job(stack: &stack::OcrStack, job: &OcrJob) -> Result<(page::PageOcr, bool
             Err(why) => {
                 tracing::warn!(page = job.page + 1, reason = %why, "embedded image failed; trying rendered page");
                 let render = page::rendered_image(doc, job.page)?;
-                return ocr_one(stack, &render, &job.lang);
+                return ocr_one(stack, &render, job);
             }
         };
-        let first = match ocr_one(stack, &img, &job.lang) {
+        let first = match ocr_one(stack, &img, job) {
             Ok(out) => out,
             Err(why) => {
                 tracing::warn!(page = job.page + 1, reason = %why, "embedded OCR failed; trying rendered page");
                 let render = page::rendered_image(doc, job.page)?;
-                return ocr_one(stack, &render, &job.lang);
+                return ocr_one(stack, &render, job);
             }
         };
         let first_len = first.0.text.trim().chars().count();
@@ -343,7 +346,7 @@ fn run_job(stack: &stack::OcrStack, job: &OcrJob) -> Result<(page::PageOcr, bool
         }
         tracing::warn!(page = job.page + 1, chars = first_len, "embedded OCR suspiciously short; retrying with rendered page");
         let render = page::rendered_image(doc, job.page)?;
-        let second = ocr_one(stack, &render, &job.lang)?;
+        let second = ocr_one(stack, &render, job)?;
         let second_len = second.0.text.trim().chars().count();
         // Search needs recall: either side can hold unique lines (e.g. the
         // header only in embedded, the body only in the render). Union them
@@ -367,7 +370,7 @@ fn run_job(stack: &stack::OcrStack, job: &OcrJob) -> Result<(page::PageOcr, bool
         return Ok((merged, base.1 || extra.1));
     }
     let img = page::rendered_image(doc, job.page)?;
-    ocr_one(stack, &img, &job.lang)
+    ocr_one(stack, &img, job)
 }
 
 /// Pages with fewer non-whitespace chars than this after embedded-image OCR
@@ -375,13 +378,9 @@ fn run_job(stack: &stack::OcrStack, job: &OcrJob) -> Result<(page::PageOcr, bool
 /// retry harmlessly and still come back empty.
 const FALLBACK_MIN_CHARS: usize = 100;
 
-fn ocr_one(
-    stack: &stack::OcrStack,
-    img: &image::DynamicImage,
-    plan: &LangPlan,
-) -> Result<(page::PageOcr, bool), String> {
-    match plan {
-        LangPlan::Fixed(l) => page::ocr_image(stack, img, *l).map(|p| (p, false)),
+fn ocr_one(stack: &stack::OcrStack, img: &image::DynamicImage, job: &OcrJob) -> Result<(page::PageOcr, bool), String> {
+    match &job.lang {
+        LangPlan::Fixed(l) => page::ocr_image(stack, img, *l, &job.line_langs).map(|p| (p, false)),
         LangPlan::Probe(candidates) => page::probe_and_ocr(stack, img, candidates),
     }
 }
