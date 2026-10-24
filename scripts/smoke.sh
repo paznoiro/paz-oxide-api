@@ -50,7 +50,7 @@ wait_ready "$URL" || { echo "not ready after 60 s"; exit 1; }
 
 req "healthz"                     200 "j['status']=='ok'"                              "$URL/healthz"
 req "readyz"                      200 "j['status']=='ready'"                           "$URL/readyz"
-req "version: auth on, OCR en/hi/ar ready" 200 "j['auth'] and j['ocr']['status']=='ready' and all(j['ocr']['languages'][l]=='available' for l in ('en','hi','ar'))" "$URL/version"
+req "version: auth on, OCR en/hi/ar/ta ready" 200 "j['auth'] and j['ocr']['status']=='ready' and all(j['ocr']['languages'][l]=='available' for l in ('en','hi','ar','ta'))" "$URL/version"
 # A public deployment keeps /metrics behind Caddy (404); skip those checks there.
 metrics=$(curl -s -o /dev/null -w '%{http_code}' "$URL/metrics")
 skip_metrics() { [ "$metrics" = 404 ] && printf '  \033[33mSKIP\033[0m %s (/metrics not exposed at %s)\n' "$1" "$URL"; }
@@ -119,6 +119,8 @@ req "scan hi (probe)"   200 "j['ocr']['lang']=='hi' and j['ocr']['lang_source']=
     -H "$AUTH" --data-binary @$F/scan_hi.pdf "$URL/v1/extract/text"
 req "scan ar (probe)"   200 "j['ocr']['lang']=='ar' and j['ocr']['lang_source']=='probe' and 'مرحبا بالعالم' in j['text']" \
     -H "$AUTH" --data-binary @$F/scan_ar.pdf "$URL/v1/extract/text"
+req "scan ta (probe)"   200 "j['ocr']['lang']=='ta' and j['ocr']['lang_source']=='probe' and 'தமிழ்நாடு அரசு' in j['text']" \
+    -H "$AUTH" --data-binary @$F/scan_ta.pdf "$URL/v1/extract/text"
 req "lang=ar param"     200 "j['ocr']['lang']=='ar' and j['ocr']['lang_source']=='param'" \
     -H "$AUTH" --data-binary @$F/scan_ar.pdf "$URL/v1/extract/text?lang=ar"
 req "ocr=off skips OCR" 200 "j['ocr']['status']=='off' and len(j['text'])<20" \

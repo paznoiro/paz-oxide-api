@@ -24,6 +24,7 @@ pub fn model_files(lang: Lang) -> (String, String) {
         Lang::En => OcrLanguage::English,
         Lang::Hi => OcrLanguage::Devanagari,
         Lang::Ar => OcrLanguage::Arabic,
+        Lang::Ta => OcrLanguage::Tamil,
     };
     let spec = ocr_lang.spec();
     (spec.rec_file, spec.dict_file)

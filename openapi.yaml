@@ -10,7 +10,7 @@ info:
     serves every format.
 
     PDF pages are classified one by one: pages with a usable text layer are extracted natively,
-    and scanned or legacy-font pages go through OCR (English, Hindi, Arabic) in the same request.
+    and scanned or legacy-font pages go through OCR (English, Hindi, Arabic, Tamil) in the same request.
     Images go straight to OCR, one page per TIFF page; EXIF orientation is honoured. HEIC, AVIF
     and JPEG XL are recognized but not supported.
 
@@ -509,7 +509,7 @@ components:
         `en`.
       schema:
         type: string
-        enum: [auto, en, hi, ar]
+        enum: [auto, en, hi, ar, ta]
         default: auto
     detect_headings:
       name: detect_headings
@@ -865,7 +865,7 @@ components:
             (models not loaded, or the language isn't available). `off`: `ocr=off`.
         lang:
           type: string
-          enum: [en, hi, ar]
+          enum: [en, hi, ar, ta]
         lang_source:
           type: string
           enum: [param, font, text, probe, default]

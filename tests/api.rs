@@ -416,7 +416,7 @@ async fn complex_script_native_pdfs() {
 #[tokio::test]
 async fn slim_reports_pages_needing_ocr() {
     let app = app();
-    for f in ["scan_en.pdf", "scan_hi.pdf", "scan_ar.pdf"] {
+    for f in ["scan_en.pdf", "scan_hi.pdf", "scan_ar.pdf", "scan_ta.pdf"] {
         let r = send(&app, raw_req("/v1/extract/text", fixture(f))).await;
         assert_eq!(r.status, StatusCode::OK);
         let j = r.json();

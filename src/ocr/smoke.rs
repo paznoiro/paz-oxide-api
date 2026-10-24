@@ -16,6 +16,7 @@ fn golden(lang: Lang) -> Golden {
         Lang::En => Golden { png: include_bytes!("fixtures/en.png"), expected: "Invoice 2026 total due" },
         Lang::Hi => Golden { png: include_bytes!("fixtures/hi.png"), expected: "भारत का संविधान" },
         Lang::Ar => Golden { png: include_bytes!("fixtures/ar.png"), expected: "مرحبا بالعالم" },
+        Lang::Ta => Golden { png: include_bytes!("fixtures/ta.png"), expected: "தமிழ்நாடு அரசு" },
     }
 }
 

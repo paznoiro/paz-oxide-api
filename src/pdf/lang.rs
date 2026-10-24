@@ -10,16 +10,18 @@ pub enum Lang {
     En,
     Hi,
     Ar,
+    Ta,
 }
 
 impl Lang {
-    pub const ALL: [Lang; 3] = [Lang::En, Lang::Hi, Lang::Ar];
+    pub const ALL: [Lang; 4] = [Lang::En, Lang::Hi, Lang::Ar, Lang::Ta];
 
     pub fn code(self) -> &'static str {
         match self {
             Lang::En => "en",
             Lang::Hi => "hi",
             Lang::Ar => "ar",
+            Lang::Ta => "ta",
         }
     }
 
@@ -28,6 +30,7 @@ impl Lang {
             "en" => Lang::En,
             "hi" => Lang::Hi,
             "ar" => Lang::Ar,
+            "ta" => Lang::Ta,
             _ => return None,
         })
     }
@@ -42,6 +45,7 @@ impl Lang {
             Lang::En => counts.latin,
             Lang::Hi => counts.devanagari,
             Lang::Ar => counts.arabic,
+            Lang::Ta => counts.tamil,
         };
         own as f32 / total as f32
     }
@@ -95,10 +99,13 @@ pub fn resolve_static(param: LangParam, legacy_font: bool, native_text_counts: &
     None
 }
 
-/// Upstream's heuristic: Arabic or Devanagari wins when its count is ≥ 4
-/// and at least half the Latin count.
+/// Upstream's heuristic, extended to Tamil: the most frequent non-Latin
+/// script (Arabic, then Devanagari, then Tamil on a tie) wins when its count
+/// is ≥ 4 and at least half the Latin count.
 pub fn script_heuristic(c: &ScriptCounts) -> Option<Lang> {
-    let (n, lang) = if c.arabic >= c.devanagari { (c.arabic, Lang::Ar) } else { (c.devanagari, Lang::Hi) };
+    let (n, lang) = [(c.devanagari, Lang::Hi), (c.tamil, Lang::Ta)]
+        .into_iter()
+        .fold((c.arabic, Lang::Ar), |best, x| if x.0 > best.0 { x } else { best });
     (n >= 4 && n * 2 >= c.latin).then_some(lang)
 }
 
@@ -114,6 +121,10 @@ mod tests {
         assert_eq!(script_heuristic(&c), None);
         let c = ScriptCounts::of("भारत एक देश है", 8000);
         assert_eq!(script_heuristic(&c), Some(Lang::Hi));
+        let c = ScriptCounts::of("தமிழ்நாடு அரசு ஆவணம் and a few english words", 8000);
+        assert_eq!(script_heuristic(&c), Some(Lang::Ta));
+        let c = ScriptCounts::of("A long English paragraph with one Tamil word வணக்கம்", 8000);
+        assert_eq!(script_heuristic(&c), None);
     }
 
     #[test]
@@ -130,6 +141,7 @@ mod tests {
     fn parse() {
         assert_eq!(LangParam::parse("AUTO"), Some(LangParam::Auto));
         assert_eq!(LangParam::parse("hi"), Some(LangParam::Fixed(Lang::Hi)));
+        assert_eq!(LangParam::parse("TA"), Some(LangParam::Fixed(Lang::Ta)));
         assert_eq!(LangParam::parse("fr"), None);
     }
 }

@@ -18,6 +18,8 @@ sha256() {
 DEEPGHS=https://huggingface.co/deepghs/paddleocr/resolve/e7bd63d9c674c96bd4fdab435af0efb383919c18
 MONKT=https://huggingface.co/monkt/paddleocr-onnx/resolve/7b02d0a30a07ba2b92ad1ff5a8941ae2c633de65
 PADDLE=https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf/ppocr/utils/dict
+PADDLE_TA=https://huggingface.co/PaddlePaddle/ta_PP-OCRv5_mobile_rec_onnx/resolve/0db89798af0d5218fad9ea7ace0557526e9077f1
+PADDLE_V5_DICT=https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/8ee4a20cc64fe2d73adf96110f9c9b1c3b7b85a5/ppocr/utils/dict
 
 fetch() { # <file> <sha256> <url>
   if [ -f "$DEST/$1" ] && echo "$2  $DEST/$1" | sha256 -c - >/dev/null 2>&1; then
@@ -40,3 +42,9 @@ fetch devanagari_dict.txt  b5f1be6d8bbff1a19fb96c5d4ca96a423380234bb7d2ce0e07b58
 # ar: Arabic PP-OCRv3 recognizer + PaddleOCR dictionary.
 fetch rec_arabic.onnx      1be9c242e6f4cb974ba19e75b55368eee776c8fe411a7150616f82a210b974c0 "$DEEPGHS/rec/arabic_PP-OCRv3_rec/model.onnx"
 fetch arabic_dict.txt      637c27c88512c22089bef927b34ada08f748dc132ac70facd68d8202384c2726 "$PADDLE/arabic_dict.txt"
+# ta: Tamil PP-OCRv5 mobile recognizer (PaddlePaddle's own ONNX export) + its
+# dictionary (byte-identical to the character_dict in the model's inference.yml).
+# Chosen over the PP-OCRv3 Tamil model, which emits no spaces and puts the
+# left-side vowel signs (ெ ே ை) before their consonant.
+fetch rec_ta.onnx          c6d2b682d2a0ea4cb1fccdba295976f93fd439964d16cdc666cadef531accbee "$PADDLE_TA/inference.onnx"
+fetch ta_dict.txt          85b541352ae18dc6ba6d47152d8bf8adff6b0266e605d2eef2990c1bf466117b "$PADDLE_V5_DICT/ppocrv5_ta_dict.txt"

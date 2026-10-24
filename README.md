@@ -2,7 +2,7 @@
 
 One small, fast HTTP API that extracts **text** and **markdown** from **PDF**, **Office** (DOCX,
 XLSX, PPTX, DOC, XLS, PPT), **OpenDocument** (ODT, ODS, ODP) and **image** files (PNG, JPEG, TIFF,
-WebP, GIF, BMP, JPEG 2000, PNM, TGA), with OCR in **English, Hindi and Arabic**. Built on
+WebP, GIF, BMP, JPEG 2000, PNM, TGA), with OCR in **English, Hindi, Arabic and Tamil**. Built on
 [`pdf_oxide`](https://github.com/yfedoseev/pdf_oxide) and
 [`office_oxide`](https://github.com/yfedoseev/office_oxide). See [PLAN.md](PLAN.md) for the design.
 
@@ -117,7 +117,7 @@ Parameters (query string, multipart parts or JSON keys; never nested):
 | `ocr` | PDF, images | `auto` (default), `force`, `off` |
 | `ocr_engine` | PDF, images | `paddle` (default), `indra` |
 | `include_debug` | extraction | `false` (default); `true` returns flow steps and forces JSON |
-| `lang` | PDF, images | `auto` (default), `en`, `hi`, `ar` |
+| `lang` | PDF, images | `auto` (default), `en`, `hi`, `ar`, `ta` |
 | `detect_headings` | PDF markdown | `true` (default) / `false` |
 | `clean` | any extraction | `false` (default) / `true`: collapse extra spaces/tabs to one space, trailing whitespace removed, 3+ newlines to one blank line |
 | `filename` | any | last-resort format hint from the extension |
@@ -199,7 +199,7 @@ merged with OCR using the shared flow. The CLI uses `--format json --mode ocr
 `OXIDE_API_INDRA_MATH=false` in the container environment/deployment properties.
 `lang` selects Paddle recognizers; Indra selects scripts itself, so a supplied
 `lang` is listed in `ignored_params`. Script support depends on the pinned Indra
-model set, independent of Paddle's `en,hi,ar` recognizers.
+model set, independent of Paddle's `en,hi,ar,ta` recognizers.
 
 ```sh
 curl -H "$AUTH" -F file=@invoice.pdf \
@@ -251,7 +251,7 @@ from the existing request admission limit. Verify a running image with
 `POST /v1/extract/document` accepts **PDF only**, in the same multipart, base64 JSON and raw
 body forms as `/v1/extract/text`. It supports digital, scanned and mixed PDFs, including pages
 with both native text and scanned content. Parameters: `pages`, `ocr=auto|force|off`,
-`lang=auto|en|hi|ar`, `clean`, `format`, `filename`. The response is always JSON.
+`lang=auto|en|hi|ar|ta`, `clean`, `format`, `filename`. The response is always JSON.
 
 ```sh
 curl -H "$AUTH" -F file=@invoice.pdf 'http://localhost:8080/v1/extract/document?lang=en'
@@ -370,7 +370,7 @@ owner-password-only PDF opens normally.
   first OCR page with every recognizer, and the most confident one whose output is in its own script
   wins. If nothing else applies, `en`. The response reports `lang` and
   `lang_source: param|font|text|probe|default`.
-- **Startup.** Each OCR worker builds one detector plus `en`/`hi`/`ar` recognizers once, then runs a
+- **Startup.** Each OCR worker builds one detector plus `en`/`hi`/`ar`/`ta` recognizers once, then runs a
   golden image per language. `/readyz` turns green only after that, about 0.3 s after start. A
   language that fails is reported `unavailable` by name in `/version`, and requests needing it get
   native text with `ocr.status: "unavailable"`. Missing models or a missing ONNX Runtime disable OCR,
@@ -381,7 +381,11 @@ owner-password-only PDF opens normally.
   recognizers rarely emit spaces, so the service splits each line at word gaps and recognizes the words
   separately. On 88 labelled lines that raised space-aware accuracy from 0.68 to 0.82 for Hindi and
   from 0.87 to 0.94 for Arabic. A stronger Devanagari model can be dropped into `/models` when one
-  exists in ONNX form.
+  exists in ONNX form. Tamil uses PaddlePaddle's own ONNX export of the PP-OCRv5 mobile recognizer,
+  which spaces words and orders vowel signs itself, so it needs neither step. On 48 labelled lines
+  (Noto Sans/Serif Tamil, blur + noise) it reached 0.94 character and space-aware accuracy with 32
+  lines exact. The PP-OCRv3 Tamil model scored 0.72, emitted no spaces and put ெ/ே/ை before their
+  consonant. ௌ comes out as the identical-looking ெ + ள.
 
 ## Configuration
 
@@ -402,7 +406,7 @@ owner-password-only PDF opens normally.
 | `OXIDE_API_DRAIN_DELAY_SECS` | `2` | time between `/readyz` flipping and the listener closing on SIGTERM |
 | `OXIDE_API_OCR_WORKERS` | `2` | OCR workers, each with its own detector + recognizers |
 | `OXIDE_API_OCR_TIMEOUT_SECS` | `120` | deadline for requests that OCR any page |
-| `OXIDE_API_OCR_LANGUAGES` | `en,hi,ar` | recognizers to load and smoke-test |
+| `OXIDE_API_OCR_LANGUAGES` | `en,hi,ar,ta` | recognizers to load and smoke-test |
 | `OXIDE_API_OCR_MODEL_DIR` | `/models` | Paddle model directory (flat upstream layout) |
 | `OXIDE_API_INDRA_CLI` | `indra-ocr` | executable path; invoked directly without a shell |
 | `OXIDE_API_INDRA_MODEL_DIR` | `/models/indra` | pinned local Indra models, including math; no runtime downloads |
@@ -501,6 +505,7 @@ page styling; scanned pages still have only the lines and paragraphs supplied by
 |---|---|---|
 | Two images (`:slim` < 20 MB, `:ocr` ≈ 100 MB) | **one image** with OCR | one container that does everything is simpler to run |
 | PDF and Office input | adds **OpenDocument** and **images** | requested later; ODF goes through an own reader into `office_oxide`'s document model, images straight to OCR |
+| OCR in `en`, `hi`, `ar` | adds **`ta`** (Tamil, PP-OCRv5) | requested later; the v5 model needs no word splitting or vowel reordering (measured above) |
 | ONNX Runtime 1.23.x | **1.28.3** | `ort` 2.0.0-rc.13 (pinned by `pdf_oxide`) enables `api-27` and refuses older runtimes |
 | Stock `pdf_oxide` | four patches | see above |
 | OCR reads the page's largest image | same, **plus page rendering** for legacy-font pages, `ocr=force` and pages without a usable scan | Kruti Dev pages are vector text with no image to OCR |

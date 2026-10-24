@@ -73,14 +73,14 @@ impl Config {
         };
 
         let ocr_languages: Vec<String> = var("OXIDE_API_OCR_LANGUAGES")
-            .unwrap_or_else(|| "en,hi,ar".into())
+            .unwrap_or_else(|| "en,hi,ar,ta".into())
             .split(',')
             .map(|s| s.trim().to_ascii_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
         for l in &ocr_languages {
-            if !matches!(l.as_str(), "en" | "hi" | "ar") {
-                return Err(format!("OXIDE_API_OCR_LANGUAGES: unsupported language {l:?} (accepted: en, hi, ar)"));
+            if !matches!(l.as_str(), "en" | "hi" | "ar" | "ta") {
+                return Err(format!("OXIDE_API_OCR_LANGUAGES: unsupported language {l:?} (accepted: en, hi, ar, ta)"));
             }
         }
 
@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(c.max_text_chars, 4_194_304);
         assert_eq!(c.max_pdf_pages, 2000);
         assert_eq!(c.max_image_pixels, 64_000_000);
-        assert_eq!(c.ocr_languages, vec!["en", "hi", "ar"]);
+        assert_eq!(c.ocr_languages, vec!["en", "hi", "ar", "ta"]);
         assert!(c.indra_math);
         assert_eq!(c.indra_max_concurrent, 1);
     }

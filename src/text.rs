@@ -107,6 +107,7 @@ pub struct ScriptCounts {
     pub latin: usize,
     pub arabic: usize,
     pub devanagari: usize,
+    pub tamil: usize,
 }
 
 impl ScriptCounts {
@@ -125,12 +126,13 @@ impl ScriptCounts {
                 self.arabic += 1
             }
             '\u{0900}'..='\u{097F}' => self.devanagari += 1,
+            '\u{0B80}'..='\u{0BFF}' => self.tamil += 1,
             _ => {}
         }
     }
 
     pub fn letters(&self) -> usize {
-        self.latin + self.arabic + self.devanagari
+        self.latin + self.arabic + self.devanagari + self.tamil
     }
 }
 
@@ -160,6 +162,7 @@ enum Script {
     Latin,
     Devanagari,
     Arabic,
+    Tamil,
     Other,
 }
 
@@ -169,6 +172,8 @@ fn script_of(c: char) -> Option<Script> {
         '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}' | '\u{FB50}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFE}' => {
             Some(Script::Arabic)
         }
+        // The whole block, so the pulli (U+0BCD, not Alphabetic) stays in its word.
+        '\u{0B80}'..='\u{0BFF}' => Some(Script::Tamil),
         // Combining accents (decomposed é) belong to the Latin word.
         '\u{0300}'..='\u{036F}' | '\u{1E00}'..='\u{1EFF}' => Some(Script::Latin),
         c if c.is_alphabetic() => Some(if (c as u32) < 0x250 { Script::Latin } else { Script::Other }),
@@ -376,6 +381,8 @@ mod tests {
         assert_eq!(c.latin, 5);
         assert_eq!(c.arabic, 5);
         assert!(c.devanagari >= 5);
+        let c = ScriptCounts::of("தமிழ் 2026", 8000);
+        assert_eq!((c.tamil, c.letters()), (5, 5));
     }
 
     #[test]
@@ -391,6 +398,7 @@ mod tests {
             "Über die Größe der Straße: Ça coûte très cher, n'est-ce pas? El niño está aquí mañana.",
             "यह एक परीक्षण दस्तावेज़ है जिसमें हिंदी पाठ लिखा गया है और यह पढ़ने योग्य है",
             "هذا مستند اختبار يحتوي على نص عربي مكتوب بشكل صحيح ويمكن قراءته بسهولة",
+            "இது ஒரு சோதனை ஆவணம் இதில் தமிழ் உரை சரியாக எழுதப்பட்டுள்ளது மற்றும் படிக்கக்கூடியது",
         ] {
             assert_eq!(ocr_layer_is_junk(real), Some(false), "{real}");
         }

@@ -102,7 +102,7 @@ impl ExtractParams {
             .unwrap_or(OcrMode::Auto);
         let lang = p
             .get("lang")
-            .map(|v| LangParam::parse(v).ok_or_else(|| ApiError::invalid_param("lang", v, "auto, en, hi, ar")))
+            .map(|v| LangParam::parse(v).ok_or_else(|| ApiError::invalid_param("lang", v, "auto, en, hi, ar, ta")))
             .transpose()?
             .unwrap_or(LangParam::Auto);
         let detect_headings = p.get("detect_headings").map(|v| parse_bool("detect_headings", v)).transpose()?.unwrap_or(true);

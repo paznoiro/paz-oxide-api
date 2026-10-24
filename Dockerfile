@@ -83,7 +83,7 @@ RUN set -eu; \
     cp -P /tmp/onnxruntime-linux-${arch}-${ORT_VERSION}/lib/libonnxruntime.so* /ort/
 
 # ---------------------------------------------------------------------------
-# models: detector + en/hi/ar recognizers and dictionaries, sha256-checked
+# models: detector + en/hi/ar/ta recognizers and dictionaries, sha256-checked
 # ---------------------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM ${ALPINE} AS models
 RUN apk add --no-cache curl
@@ -117,7 +117,7 @@ FROM indra-runtime AS runtime
 ARG ORT_VERSION
 ARG VERSION=0.3.1
 LABEL org.opencontainers.image.title="oxide-api" \
-      org.opencontainers.image.description="Text and markdown extraction from PDF, Office, OpenDocument and image files, with OCR (en, hi, ar)" \
+      org.opencontainers.image.description="Text and markdown extraction from PDF, Office, OpenDocument and image files, with OCR (en, hi, ar, ta)" \
       org.opencontainers.image.source="https://github.com/paznoiro/paz-oxide-api" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0" \
       org.opencontainers.image.version="${VERSION}" \
@@ -128,7 +128,9 @@ LABEL org.opencontainers.image.title="oxide-api" \
       dev.oxide-api.models.indra="ed345c7f158eddbc7dee0c6a7269afb75a94f7e8" \
       dev.oxide-api.models.deepghs-paddleocr="e7bd63d9c674c96bd4fdab435af0efb383919c18" \
       dev.oxide-api.models.monkt-paddleocr-onnx="7b02d0a30a07ba2b92ad1ff5a8941ae2c633de65" \
-      dev.oxide-api.models.paddleocr-dicts="dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf"
+      dev.oxide-api.models.paddleocr-dicts="dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf" \
+      dev.oxide-api.models.paddlepaddle-ta-ppocrv5="0db89798af0d5218fad9ea7ace0557526e9077f1" \
+      dev.oxide-api.models.paddleocr-dicts-v5="8ee4a20cc64fe2d73adf96110f9c9b1c3b7b85a5"
 COPY --from=onnxruntime /ort/ /usr/lib/
 COPY --from=fonts /fonts /usr/share/fonts/truetype/liberation2
 COPY --from=models /models /models

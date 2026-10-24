@@ -23,6 +23,7 @@ NOTO = "/usr/share/fonts/truetype/noto"
 FONT_LATIN = f"{NOTO}/NotoSans-Regular.ttf"
 FONT_DEVA = f"{NOTO}/NotoSansDevanagari-Regular.ttf"
 FONT_ARAB = f"{NOTO}/NotoNaskhArabic-Regular.ttf"
+FONT_TAML = f"{NOTO}/NotoSansTamil-Regular.ttf"
 DEJAVU = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 os.makedirs(OUT, exist_ok=True)
@@ -213,6 +214,9 @@ def make_scans():
     image_pdf(out("scan_ar.pdf"), render_lines(
         ["مرحبا بالعالم", "السلام عليكم ورحمة الله", "هذه وثيقة ممسوحة ضوئيا", "شكرا لكم"],
         FONT_ARAB, 60, *A4_200, rtl=True))
+    image_pdf(out("scan_ta.pdf"), render_lines(
+        ["தமிழ்நாடு அரசு", "வணக்கம் உலகம்", "மொத்த தொகை செலுத்த வேண்டியது", "உங்கள் வணிகத்திற்கு நன்றி"],
+        FONT_TAML, 60, *A4_200))
 
 
 def make_scan_with_overlay():
@@ -511,6 +515,7 @@ def make_golden():
     render_lines(["Invoice 2026 total due"], FONT_LATIN, 44, 760, 140, margin=40).save(f"{GOLDEN}/en.png", optimize=True)
     render_lines(["भारत का संविधान"], FONT_DEVA, 48, 560, 150, margin=40).save(f"{GOLDEN}/hi.png", optimize=True)
     render_lines(["مرحبا بالعالم"], FONT_ARAB, 48, 520, 150, rtl=True, margin=40).save(f"{GOLDEN}/ar.png", optimize=True)
+    render_lines(["தமிழ்நாடு அரசு"], FONT_TAML, 48, 560, 150, margin=40).save(f"{GOLDEN}/ta.png", optimize=True)
 
 
 def make_native_pdfs():

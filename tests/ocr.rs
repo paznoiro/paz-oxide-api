@@ -69,6 +69,7 @@ async fn scans_per_language_with_probe() {
         // (≈0.8 character accuracy); assert on words it reads reliably.
         ("scan_hi.pdf", "hi", &["भारत", "हम भारत", "लोग", "समता"][..]),
         ("scan_ar.pdf", "ar", &["مرحبا بالعالم", "شكرا"][..]),
+        ("scan_ta.pdf", "ta", &["தமிழ்நாடு அரசு", "வணக்கம் உலகம்", "நன்றி"][..]),
     ] {
         let (status, j) = extract(&app, "/v1/extract/text", file).await;
         assert_eq!(status, StatusCode::OK, "{file}: {j}");
@@ -309,6 +310,7 @@ async fn broken_dict_marks_language_unavailable() {
     eprintln!("{status}");
     assert_eq!(status["languages"]["en"], "available");
     assert_eq!(status["languages"]["ar"], "available");
+    assert_eq!(status["languages"]["ta"], "available");
     assert_eq!(status["languages"]["hi"]["status"], "unavailable");
     let (_, j) = extract(&app, "/v1/extract/text?lang=hi", "scan_hi.pdf").await;
     assert_eq!(j["ocr"]["status"], "unavailable");
@@ -451,6 +453,7 @@ async fn structured_scans_have_page_boxes_and_real_recognizer_confidence() {
         ("scan_en.pdf", "en", "Invoice 4471"),
         ("scan_hi.pdf", "hi", "भारत"),
         ("scan_ar.pdf", "ar", "مرحبا"),
+        ("scan_ta.pdf", "ta", "தமிழ்நாடு"),
     ] {
         let (status, j) = extract(&app, &format!("/v1/extract/document?lang={lang}"), file).await;
         assert_eq!(status, StatusCode::OK, "{j}");

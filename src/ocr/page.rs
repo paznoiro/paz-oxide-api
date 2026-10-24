@@ -168,10 +168,12 @@ pub fn arabic_pred_reverse(s: &str) -> String {
 /// (≤ 0.19) but spaces ≥ 0.31. On 88 labelled lines (two fonts per script,
 /// blur + noise) splitting raised space-aware accuracy from 0.68 to 0.82
 /// (hi) and 0.87 to 0.94 (ar) with no loss in character accuracy.
-/// `None`: the recognizer spaces words itself.
+/// `None`: the recognizer spaces words itself. Tamil's PP-OCRv5 model does:
+/// on 48 labelled lines (two fonts, blur + noise) splitting at 0.15–0.5
+/// never beat 0.944 space-aware accuracy by more than noise.
 fn word_gap(lang: Lang) -> Option<f32> {
     match lang {
-        Lang::En => None,
+        Lang::En | Lang::Ta => None,
         Lang::Hi => Some(0.11),
         Lang::Ar => Some(0.25),
     }
@@ -214,7 +216,7 @@ fn recognize_boxes(stack: &OcrStack, img: &DynamicImage, boxes: &[DetectedBox], 
 
 pub fn postprocess(lang: Lang, text: &str) -> String {
     match lang {
-        Lang::En => text.to_string(),
+        Lang::En | Lang::Ta => text.to_string(),
         Lang::Hi => reorder_devanagari_i_sign(text),
         Lang::Ar => arabic_pred_reverse(text),
     }
