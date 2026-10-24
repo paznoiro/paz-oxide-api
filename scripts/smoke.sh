@@ -150,8 +150,9 @@ req "transparent PNG"   200 "'Transparent label 8812' in j['text']" \
     -H "$AUTH" --data-binary @$F/transparent.png "$URL/v1/extract/text"
 req "TGA by filename, raw markdown" 200 "h['x-oxide-kind']=='image' and h['x-oxide-format']=='tga' and 'Format check 3141' in t" \
     -H "$AUTH" -H 'Accept: text/markdown' -F "file=@$F/line.tga" "$URL/v1/extract/markdown"
+# 2 workers × (1 detector + en/hi/ar/ta recognizers) = 10 ONNX sessions.
 skip_metrics "OCR metrics" || \
-req "OCR metrics"       200 "'oxide_ocr_pages_total' in t and 'oxide_ocr_engine_builds_total 8' in t" "$URL/metrics"
+req "OCR metrics"       200 "'oxide_ocr_pages_total' in t and 'oxide_ocr_engine_builds_total 10' in t" "$URL/metrics"
 
 echo
 echo "passed: $pass  failed: $fail"
